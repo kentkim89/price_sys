@@ -10,8 +10,15 @@ from google.oauth2.service_account import Credentials
 st.set_page_config(page_title="goremi 가격결정 시스템", page_icon="🐟", layout="wide")
 
 # --- 구글 시트 연동 설정 ---
+# =============================== 여기를 수정! ===============================
 # Streamlit의 Secrets에서 서비스 계정 정보 가져오기
-scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+# Google Sheets와 Google Drive API를 모두 사용할 수 있도록 권한 범위(scopes)를 설정합니다.
+scopes = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive"
+]
+# ==========================================================================
+
 creds = Credentials.from_service_account_info(
     st.secrets["gcp_service_account"], scopes=scopes
 )
@@ -29,6 +36,9 @@ except gspread.exceptions.SpreadsheetNotFound:
     st.stop()
 except gspread.exceptions.WorksheetNotFound:
     st.error("'confirmed_prices' 워크시트를 찾을 수 없습니다. 구글 시트에 해당 이름의 시트를 생성해주세요.")
+    st.stop()
+except Exception as e:
+    st.error(f"DB 연결 중 예상치 못한 오류가 발생했습니다: {e}")
     st.stop()
 
 
