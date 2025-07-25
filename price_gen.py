@@ -2,13 +2,55 @@ import streamlit as st
 import pandas as pd
 import os
 from datetime import datetime
+import gspread
+from gspread_dataframe import set_with_dataframe
+from google.oauth2.service_account import Credentials
 
 # --- 페이지 설정 ---
-st.set_page_config(page_title="고래미 가격결정 시스템", page_icon="🐟", layout="wide")
+st.set_page_config(page_title="goremi 가격결정 시스템", page_icon="🐟", layout="wide")
+
+# --- 구글 시트 연동 설정 ---
+# Streamlit의 Secrets에서 서비스 계정 정보 가져오기
+scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+creds = Credentials.from_service_account_info(
+    st.secrets["gcp_service_account"], scopes=scopes
+)
+client = gspread.authorize(creds)
+
+# 연결할 구글 시트 이름
+GOOGLE_SHEET_NAME = "Goremi Price DB"
+# 구글 시트 열기
+try:
+    spreadsheet = client.open(GOOGLE_SHEET_NAME)
+    worksheet = spreadsheet.worksheet("confirmed_prices") # 시트 이름 지정
+    st.sidebar.success(f"'{GOOGLE_SHEET_NAME}' DB에 연결되었습니다.")
+except gspread.exceptions.SpreadsheetNotFound:
+    st.error(f"'{GOOGLE_SHEET_NAME}'라는 이름의 구글 시트를 찾을 수 없습니다. 시트가 존재하는지, 서비스 계정에 공유되었는지 확인해주세요.")
+    st.stop()
+except gspread.exceptions.WorksheetNotFound:
+    st.error("'confirmed_prices' 워크시트를 찾을 수 없습니다. 구글 시트에 해당 이름의 시트를 생성해주세요.")
+    st.stop()
+
 
 # --- 데이터 로딩 함수 ---
+@st.cache_data(ttl=600) # 10분마다 데이터 갱신
+def load_data_from_gsheet(worksheet):
+    """구글 시트에서 데이터를 DataFrame으로 로드합니다."""
+    data = worksheet.get_all_records()
+    df = pd.DataFrame(data)
+    # 데이터가 없을 경우를 대비하여 필수 컬럼을 포함한 빈 DataFrame 생성
+    required_cols = ['confirm_date', 'product_name', 'customer_name', 'cost_price', 'standard_price', 'supply_price', 'margin_rate', 'total_fee_rate']
+    if df.empty:
+        return pd.DataFrame(columns=required_cols).fillna(0)
+    # 누락된 컬럼이 있다면 0으로 채워서 추가
+    for col in required_cols:
+        if col not in df.columns:
+            df[col] = 0
+    return df.fillna(0)
+
 @st.cache_data
-def load_data(file_path):
+def load_local_data(file_path):
+    """로컬 CSV 파일(제품, 거래처 정보)을 로드합니다."""
     if os.path.exists(file_path):
         return pd.read_csv(file_path).fillna(0)
     return pd.DataFrame()
@@ -16,16 +58,13 @@ def load_data(file_path):
 # --- 데이터 파일 경로 ---
 PRODUCTS_FILE = 'products.csv'
 CUSTOMERS_FILE = 'customers.csv'
-CONFIRMED_PRICES_FILE = 'confirmed_prices.csv'
 
 # --- 데이터 로드 ---
-products_df = load_data(PRODUCTS_FILE)
-customers_df = load_data(CUSTOMERS_FILE)
-confirmed_prices_df = load_data(CONFIRMED_PRICES_FILE)
+products_df = load_local_data(PRODUCTS_FILE)
+customers_df = load_local_data(CUSTOMERS_FILE)
+# 구글 시트에서 확정 가격 데이터 로드
+confirmed_prices_df = load_data_from_gsheet(worksheet)
 
-# --- 세션 상태 초기화: 앱 세션 동안 확정 목록을 저장할 리스트 ---
-if 'confirmed_list' not in st.session_state:
-    st.session_state.confirmed_list = []
 
 # 필수 파일 확인
 if products_df.empty or customers_df.empty:
@@ -72,12 +111,13 @@ if st.sidebar.button("🔄 가격 복원"):
 # 4. 계산 기준 선택 UI
 st.sidebar.markdown("---")
 calculation_method = st.sidebar.radio("4. 계산 기준 선택", ('원가 기반 계산', '표준 공급가 기반 계산'))
-goraemi_target_margin = st.sidebar.slider("고래미 목표 마진율 (%)", 1, 100, 30) if '원가 기반' in calculation_method else 0
+goremi_target_margin = st.sidebar.slider("goremi 목표 마진율 (%)", 1, 100, 30) if '원가 기반' in calculation_method else 0
 
-# --- 메인 대시보드 (탭으로 UI 분리) ---
-st.title("🐟 고래미 가격 결정 및 관리 시스템")
+# --- 메인 대시보드 ---
+st.title("🐟 goremi 가격 결정 및 관리 시스템")
 
-tab_simulate, tab_manage = st.tabs(["가격 시뮬레이션 & 확정", "확정 목록 관리 & DB 업데이트"])
+tab_simulate, tab_db_view = st.tabs(["가격 시뮬레이션 & 확정", "전체 확정 DB 조회"])
+
 
 # ==================== 시뮬레이션 탭 ====================
 with tab_simulate:
@@ -105,86 +145,63 @@ with tab_simulate:
     # --- 계산 로직 ---
     total_deduction_rate = (st.session_state.conditions['vendor_fee'] + st.session_state.conditions['discount'] + sum(st.session_state.conditions.get(item, 0.0) for item in cost_items)) / 100
     cost_price, standard_price = st.session_state.editable_cost, st.session_state.editable_standard_price
-    supply_price, goraemi_margin = 0, 0
+    supply_price, goremi_margin = 0, 0
     if '원가 기반' in calculation_method:
-        if (1 - goraemi_target_margin / 100) > 0 and (1 - total_deduction_rate) > 0:
-            price_for_margin = cost_price / (1 - goraemi_target_margin / 100)
+        if (1 - goremi_target_margin / 100) > 0 and (1 - total_deduction_rate) > 0:
+            price_for_margin = cost_price / (1 - goremi_target_margin / 100)
             supply_price = price_for_margin / (1 - total_deduction_rate)
             net_received = supply_price * (1 - total_deduction_rate)
-            if net_received > 0: goraemi_margin = (net_received - cost_price) / net_received * 100
+            if net_received > 0: goremi_margin = (net_received - cost_price) / net_received * 100
     else:
         supply_price = standard_price
         net_received = supply_price * (1 - total_deduction_rate)
-        if net_received > 0: goraemi_margin = (net_received - cost_price) / net_received * 100
+        if net_received > 0: goremi_margin = (net_received - cost_price) / net_received * 100
 
     # --- 결과 및 확정 버튼 ---
     st.header("2. 시뮬레이션 결과")
     res_col1, res_col2, res_col3 = st.columns(3)
     res_col1.metric("계산된 최종 공급단가", f"{supply_price:,.0f} 원")
-    res_col2.metric("예상 마진율", f"{goraemi_margin:.1f} %")
+    res_col2.metric("예상 마진율", f"{goremi_margin:.1f} %")
     res_col3.metric("총 비용률", f"{total_deduction_rate * 100:.1f} %")
 
     st.markdown("---")
-    if st.button("✅ 이 가격으로 확정하기", type="primary", use_container_width=True):
+    if st.button("✅ 이 가격으로 확정하고 DB에 자동 저장", type="primary", use_container_width=True):
         new_price_entry = {
-            "confirm_date": datetime.now().strftime("%Y-%m-%d %H:%M"), "product_name": selected_product_name,
-            "customer_name": selected_customer_name, "cost_price": cost_price, "standard_price": standard_price,
-            "supply_price": round(supply_price), "margin_rate": round(goraemi_margin, 2), "total_fee_rate": round(total_deduction_rate * 100, 2)
+            "confirm_date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "product_name": selected_product_name,
+            "customer_name": selected_customer_name,
+            "cost_price": cost_price,
+            "standard_price": standard_price,
+            "supply_price": round(supply_price),
+            "margin_rate": round(goremi_margin, 2),
+            "total_fee_rate": round(total_deduction_rate * 100, 2)
         }
-        st.session_state.confirmed_list.append(new_price_entry)
-        st.success(f"가격이 확정되었습니다! '확정 목록 관리' 탭에서 확인하고 모든 작업 후 DB를 업데이트해주세요.")
+        
+        # 새로운 데이터를 기존 DB와 통합 (중복 시 최신 데이터로 덮어쓰기)
+        new_df = pd.DataFrame([new_price_entry])
+        # 인덱스를 기준으로 데이터를 합치기 위해 기존 데이터의 인덱스를 재설정
+        updated_df = pd.concat([confirmed_prices_df.set_index(['product_name', 'customer_name']), new_df.set_index(['product_name', 'customer_name'])])
+        # 중복된 인덱스 중 마지막 것만 남기고, 인덱스를 다시 컬럼으로 변환
+        final_df = updated_df[~updated_df.index.duplicated(keep='last')].reset_index()
 
+        # 구글 시트에 데이터 업데이트
+        try:
+            with st.spinner("DB에 데이터를 저장하는 중입니다..."):
+                # DataFrame을 구글 시트에 쓰기 (기존 내용 전체 덮어쓰기)
+                set_with_dataframe(worksheet, final_df)
+            st.success("가격이 확정되어 DB에 성공적으로 저장되었습니다! '전체 확정 DB 조회' 탭에서 확인하세요.")
+            # 캐시된 데이터 삭제하여 다음 로드 시 최신 정보 반영
+            st.cache_data.clear()
+        except Exception as e:
+            st.error(f"DB 저장 중 오류가 발생했습니다: {e}")
 
-# ==================== DB 관리 탭 ====================
-with tab_manage:
-    st.header("이번 세션에서 확정한 목록")
-    if not st.session_state.confirmed_list:
-        st.info("아직 이번 세션에서 확정한 가격이 없습니다. '가격 시뮬레이션 & 확정' 탭에서 가격을 확정해주세요.")
-    else:
-        session_df = pd.DataFrame(st.session_state.confirmed_list)
-        st.dataframe(session_df, use_container_width=True)
-
-    st.header("영구 저장을 위한 DB 업데이트")
-    st.warning("**매우 중요:** 아래 절차를 따라야 데이터가 영구적으로 저장(누적)됩니다.")
-
-    with st.container(border=True):
-        st.markdown("""
-        **데이터 영구 저장 방법 (필수 절차)**
-
-        1.  **데이터 종합 및 다운로드**
-            *   모든 가격 확정 작업을 마친 후, 아래의 `[📥 DB 업데이트용 파일 다운로드]` 버튼을 클릭하여 `new_confirmed_prices.csv` 파일을 다운로드합니다.
-            *   이 파일 안에는 **과거의 모든 기록**과 **오늘 새로 확정한 기록**이 모두 합쳐져 있습니다.
-
-        2.  **GitHub 파일 업데이트**
-            *   [여기를 클릭하여 GitHub의 `confirmed_prices.csv` 파일로 이동합니다.](https://github.com/YOUR_USERNAME/YOUR_REPOSITORY/blob/main/confirmed_prices.csv)  <!-- 링크를 본인 것으로 수정하세요 -->
-            *   파일 우측 상단의 **연필(✏️) 아이콘**을 클릭하여 편집 모드로 들어갑니다.
-            *   **기존 내용을 모두 삭제**하고, 방금 다운로드한 `new_confirmed_prices.csv` 파일의 내용을 **전체 복사하여 붙여넣습니다.**
-
-        3.  **저장 완료**
-            *   페이지 하단의 초록색 **`Commit changes`** 버튼을 누르면 모든 변경사항이 영구적으로 저장됩니다. 앱을 새로고침하면 '기존 확정 가격 DB'에 반영된 것을 볼 수 있습니다.
-        """)
-
-    # --- 다운로드 버튼 로직 ---
-    # 누적을 위한 데이터 결합
-    session_df_to_save = pd.DataFrame(st.session_state.confirmed_list)
-    combined_df = pd.concat([confirmed_prices_df, session_df_to_save]).drop_duplicates(
-        subset=['product_name', 'customer_name'], keep='last'
-    )
-
-    @st.cache_data
-    def convert_df_to_csv(df):
-        return df.to_csv(index=False, encoding='utf-8-sig')
-
-    csv_data = convert_df_to_csv(combined_df)
-
-    st.download_button(
-       label="📥 DB 업데이트용 파일 다운로드",
-       data=csv_data,
-       file_name="new_confirmed_prices.csv",
-       mime="text/csv",
-       use_container_width=True,
-       disabled=not st.session_state.confirmed_list # 확정한 내용이 없으면 비활성화
-    )
+# ==================== DB 조회 탭 ====================
+with tab_db_view:
+    st.header("전체 확정 가격 DB (읽기 전용)")
+    st.info("이 데이터는 'Goremi Price DB' 구글 시트에서 직접 가져온 최신 정보입니다.")
     
-    st.header("기존 확정 가격 DB (읽기 전용)")
+    if st.button("🔄 DB 새로고침"):
+        st.cache_data.clear()
+        st.rerun()
+
     st.dataframe(confirmed_prices_df, use_container_width=True)
