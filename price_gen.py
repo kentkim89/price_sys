@@ -9,7 +9,7 @@ st.set_page_config(page_title="고래미 가격결정 시스템", page_icon="�
 PRODUCTS_FILE = 'products.csv'
 CUSTOMERS_FILE = 'customers.csv'
 CONFIRMED_PRICES_FILE = 'confirmed_prices.csv'
-REPO_NAME = "your_github_username/your_repo_name" # 예: "goraemi-kim/pricing-app" (본인 것으로 수정!)
+REPO_NAME = "kentkim89/price_sys" # 예: "goraemi-kim/pricing-app" (본인 것으로 수정!)
 
 
 # --- GitHub 파일 업데이트 함수 ---
