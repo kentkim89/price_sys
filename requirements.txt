@@ -3,4 +3,3 @@ pandas
 gspread
 gspread-dataframe
 google-auth-oauthlib
-bcrypt
