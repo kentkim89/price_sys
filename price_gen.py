@@ -5,14 +5,12 @@ from datetime import datetime
 import gspread
 from gspread_dataframe import set_with_dataframe
 from google.oauth2.service_account import Credentials
-import bcrypt
 import time
 
 # --- 페이지 설정 ---
 st.set_page_config(page_title="goremi 가격결정 시스템", page_icon="🐟", layout="wide")
 
 # --- (설정) DB 정보 및 컬럼 정의 ---
-USER_DB_NAME = "Goremi Users DB"
 CLIENT_DB_NAME = "Goremi Clients DB"
 PRICE_DB_NAME = "Goremi Price DB"
 PRODUCTS_FILE = 'products.csv'
@@ -23,6 +21,33 @@ REQUIRED_CLIENT_COLS = [
     '점포 배송비 (%)', '지정창고 입고비 (%)', '피킹 수수료 (%)', 'Zone 분류 수수료 (%)'
 ]
 NUMERIC_CLIENT_COLS = [col for col in REQUIRED_CLIENT_COLS if col not in ['customer_name', 'channel_type']]
+
+# =============================== 여기가 핵심 수정 부분 ===============================
+# --- 비밀번호 잠금 기능 ---
+def check_password():
+    """비밀번호가 맞을 때까지 앱의 나머지 부분을 실행하지 않고 대기합니다."""
+    if "password_correct" not in st.session_state:
+        st.session_state.password_correct = False
+
+    if not st.session_state.password_correct:
+        st.title("🐟 goremi 가격결정 시스템")
+        st.header("비밀번호를 입력하세요")
+
+        with st.form("password_form"):
+            password = st.text_input("비밀번호", type="password")
+            submitted = st.form_submit_button("입장")
+
+            if submitted:
+                # 비밀번호를 "0422"로 설정
+                if password == "0422":
+                    st.session_state.password_correct = True
+                    st.rerun()  # 비밀번호가 맞으면 앱을 다시 실행하여 메인 화면 표시
+                else:
+                    st.error("비밀번호가 올바르지 않습니다.")
+        
+        # 비밀번호가 맞지 않으면 아래 코드 실행을 중단
+        st.stop()
+# =================================================================================
 
 # --- 구글 시트 연동 및 데이터 로딩 함수 (이전과 동일) ---
 def get_gsheet_client():
@@ -54,106 +79,22 @@ def load_local_data(file_path):
     if os.path.exists(file_path): return pd.read_csv(file_path).fillna(0)
     return pd.DataFrame()
 
-# =============================== 여기가 핵심 수정 부분 ===============================
-# --- 로그인 및 회원가입 기능 ---
-def authentication_flow():
-    if "authenticated" not in st.session_state: st.session_state.authenticated = False
-    if "page" not in st.session_state: st.session_state.page = "login"
-
-    def set_page(page):
-        st.session_state.page = page
-
-    if st.session_state.authenticated:
-        return
-
-    # --- 로그인 페이지 ---
-    if st.session_state.page == "login":
-        st.title("🐟 goremi 가격결정 시스템 로그인")
-        users_df = load_data_from_gsheet(USER_DB_NAME, "users", ["username", "hashed_password"])
-        
-        if users_df.empty:
-            st.error("사용자 DB를 불러올 수 없습니다. 관리자에게 문의하세요.")
-            st.stop()
-        
-        # 폼은 '로그인 제출'만을 위해 사용
-        with st.form("login_form"):
-            username = st.text_input("아이디").lower()
-            password = st.text_input("비밀번호", type="password")
-            login_button = st.form_submit_button("로그인", use_container_width=True)
-
-            if login_button:
-                user_record = users_df.loc[users_df['username'] == username]
-                if not user_record.empty:
-                    hashed_password = user_record.iloc[0]['hashed_password']
-                    if bcrypt.checkpw(password.encode('utf-8'), hashed_password.encode('utf-8')):
-                        st.session_state.authenticated = True
-                        st.session_state.username = username
-                        st.rerun()
-                    else:
-                        st.error("아이디 또는 비밀번호가 잘못되었습니다.")
-                else:
-                    st.error("아이디 또는 비밀번호가 잘못되었습니다.")
-
-        # 회원가입 버튼은 폼 바깥에 일반 버튼으로 배치
-        st.divider()
-        if st.button("계정이 없으신가요? 회원가입", use_container_width=True):
-            set_page("signup")
-            st.rerun()
-
-    # --- 회원가입 페이지 ---
-    elif st.session_state.page == "signup":
-        st.title("📝 회원가입")
-        users_df = load_data_from_gsheet(USER_DB_NAME, "users", ["username", "hashed_password"])
-
-        with st.form("signup_form"):
-            new_username = st.text_input("사용할 아이디").lower()
-            new_password = st.text_input("비밀번호", type="password")
-            confirm_password = st.text_input("비밀번호 확인", type="password")
-            signup_button = st.form_submit_button("가입하기")
-
-            if signup_button:
-                if not new_username or not new_password:
-                    st.error("아이디와 비밀번호를 모두 입력해주세요.")
-                elif new_password != confirm_password:
-                    st.error("비밀번호가 일치하지 않습니다.")
-                elif not users_df.loc[users_df['username'] == new_username].empty:
-                    st.error("이미 사용 중인 아이디입니다.")
-                else:
-                    hashed = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt())
-                    with st.spinner("계정을 생성하는 중입니다..."):
-                        try:
-                            client = get_gsheet_client()
-                            worksheet = client.open(USER_DB_NAME).worksheet("users")
-                            worksheet.append_row([new_username, hashed.decode('utf-8')])
-                            st.success("회원가입이 완료되었습니다! 로그인 페이지로 이동합니다.")
-                            time.sleep(2)
-                            set_page("login")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"계정 생성 중 오류 발생: {e}")
-
-        if st.button("로그인 화면으로 돌아가기"):
-            set_page("login")
-            st.rerun()
-
-    st.stop()
-# =================================================================================
-
 # --- 메인 앱 실행 ---
-authentication_flow()
+check_password() # 모든 것보다 먼저 비밀번호 확인 실행
 
-# --- 이하는 로그인이 성공해야만 실행되는 코드들 (이전과 동일) ---
+# --- 이하는 비밀번호를 정확히 입력해야만 실행되는 코드들 ---
 CHANNEL_INFO = { "일반 도매": {"description": "용차/택배 -> 거래선 물류창고 입고", "cost_items": ["운송비 (%)"]}, "쿠팡 로켓프레시": {"description": "용차 -> 쿠팡 물류창고 입고", "cost_items": ["입고 운송비 (%)", "쿠팡 매입수수료 (%)"]}, "마트": {"description": "3PL -> 지역별 물류창고 -> 점포", "cost_items": ["3PL 기본료 (%)", "지역 간선비 (%)", "점포 배송비 (%)"]}, "프랜차이즈 본사": {"description": "용차 -> 지정 물류창고 입고", "cost_items": ["지정창고 입고비 (%)"]}, "케이터링사": {"description": "3PL -> 지역별 물류창고 (복합 수수료)", "cost_items": ["3PL 기본료 (%)", "피킹 수수료 (%)", "Zone 분류 수수료 (%)"]}, "기타 채널": {"description": "기본 배송 프로세스", "cost_items": ["기본 물류비 (%)"]} }
 customers_df = load_data_from_gsheet(CLIENT_DB_NAME, "confirmed_clients", REQUIRED_CLIENT_COLS, is_client_db=True)
 confirmed_prices_df = load_data_from_gsheet(PRICE_DB_NAME, "confirmed_prices", ['confirm_date', 'product_name', 'customer_name', 'cost_price', 'standard_price', 'supply_price', 'margin_rate', 'total_fee_rate'])
 products_df = load_local_data(PRODUCTS_FILE)
 
-st.sidebar.title(f"환영합니다, {st.session_state.username}님!")
-if st.sidebar.button("로그아웃"):
-    st.session_state.authenticated = False
-    st.session_state.username = ""
+# --- 사이드바 ---
+st.sidebar.title("📄 작업 공간")
+if st.sidebar.button("🔒 잠금화면으로 돌아가기"):
+    st.session_state.password_correct = False
     st.rerun()
 st.sidebar.markdown("---")
+
 with st.sidebar.expander("➕ 신규 거래처 추가"):
     with st.form("new_client_form", clear_on_submit=True):
         new_customer_name = st.text_input("거래처명")
@@ -173,6 +114,8 @@ with st.sidebar.expander("➕ 신규 거래처 추가"):
                         st.cache_data.clear()
                         st.rerun()
                     except Exception as e: st.error(f"저장 중 오류 발생: {e}")
+
+# (이하 나머지 코드는 이전 버전과 동일합니다)
 st.sidebar.markdown("---")
 st.sidebar.subheader("1. 분석 대상 선택")
 selected_product_name = st.sidebar.selectbox("제품 선택", products_df['product_name'])
