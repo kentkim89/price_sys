@@ -9,10 +9,18 @@ import time
 # --- 페이지 설정 ---
 st.set_page_config(page_title="goremi 가격결정 시스템", page_icon="🐟", layout="wide")
 
-# --- (설정) DB 정보 ---
+# --- (설정) DB 정보 및 컬럼 정의 ---
 PRODUCT_DB_NAME = "Goremi Products DB"
 CLIENT_DB_NAME = "Goremi Clients DB"
 PRICE_DB_NAME = "Goremi Price DB"
+
+REQUIRED_CLIENT_COLS = [
+    'customer_name', 'channel_type', 'vendor_fee', 'discount', '운송비 (%)',
+    '입고 운송비 (%)', '쿠팡 매입수수료 (%)', '3PL 기본료 (%)', '지역 간선비 (%)',
+    '점포 배송비 (%)', '지정창고 입고비 (%)', '피킹 수수료 (%)', 'Zone 분류 수수료 (%)'
+]
+NUMERIC_CLIENT_COLS = [col for col in REQUIRED_CLIENT_COLS if col not in ['customer_name', 'channel_type']]
+
 
 # --- 구글 시트 연동 및 데이터 로딩 ---
 def get_gsheet_client():
@@ -23,6 +31,7 @@ def get_gsheet_client():
 @st.cache_data(ttl=300)
 def load_and_prep_data():
     client = get_gsheet_client()
+    
     # 제품 DB 로드 및 고유 이름 생성
     products_ws = client.open(PRODUCT_DB_NAME).worksheet("products")
     products_df = pd.DataFrame(products_ws.get_all_records())
@@ -35,12 +44,23 @@ def load_and_prep_data():
         products_df[col] = products_df[col].astype(str).str.replace(',', '')
         products_df[col] = pd.to_numeric(products_df[col], errors='coerce')
     products_df = products_df.fillna(0).sort_values(by='unique_name').reset_index(drop=True)
+
+    # =============================== 여기가 핵심 수정 부분 ===============================
     # 거래처 DB 로드
     clients_ws = client.open(CLIENT_DB_NAME).worksheet("confirmed_clients")
     clients_df = pd.DataFrame(clients_ws.get_all_records())
+    
+    # 거래처 DB의 숫자 컬럼들도 안전하게 숫자형으로 변환
+    for col in NUMERIC_CLIENT_COLS:
+        if col in clients_df.columns:
+            clients_df[col] = pd.to_numeric(clients_df[col], errors='coerce')
+    clients_df = clients_df.fillna(0)
+    # =================================================================================
+    
     # 가격 DB 로드
     prices_ws = client.open(PRICE_DB_NAME).worksheet("confirmed_prices")
     prices_df = pd.DataFrame(prices_ws.get_all_records())
+    
     return products_df, clients_df, prices_df
 
 # --- 메인 앱 실행 ---
@@ -53,13 +73,7 @@ except Exception as e:
 # 데이터 마이그레이션 안내
 if not prices_df.empty and 'unique_name' not in prices_df.columns:
     st.error("🚨 데이터베이스 구조 업데이트 필요!")
-    st.warning(
-        """
-        'Goremi Price DB'의 'confirmed_prices' 시트에 `unique_name` 열이 없습니다.
-        데이터 저장 방식이 개선되었으므로, 기존 데이터를 새 구조로 전환해야 합니다.
-        **가장 안전한 방법은 `confirmed_prices` 탭의 데이터를 모두 삭제하고, 앱에서 다시 설정하는 것입니다.**
-        """
-    )
+    st.warning("`Goremi Price DB`의 `confirmed_prices` 시트에 `unique_name` 열이 없습니다. 데이터 저장 방식이 개선되었으므로, 기존 데이터를 삭제하고 앱에서 다시 설정해주세요.")
     st.stop()
 
 # --- UI 탭 정의 ---
@@ -92,24 +106,18 @@ with tab_matrix:
         if st.button(f"✅ **{selected_customer}** 의 품목 정보 저장", use_container_width=True, type="primary"):
             with st.spinner("DB를 업데이트하는 중입니다..."):
                 _, _, current_prices = load_and_prep_data()
-
                 newly_active_products = {name for name, checked in checkbox_states.items() if checked}
                 
-                # =============================== 여기가 핵심 수정 부분 ===============================
                 original_active_products = set()
-                # current_prices에 필요한 컬럼이 모두 있는지 확인 후 실행
                 if not current_prices.empty and 'customer_name' in current_prices.columns and 'unique_name' in current_prices.columns:
                     original_active_products = set(current_prices[current_prices['customer_name'] == selected_customer]['unique_name'])
-                # =================================================================================
 
                 to_add = newly_active_products - original_active_products
                 
                 final_df = pd.DataFrame()
-                # 다른 거래처 데이터는 그대로 둠
                 if not current_prices.empty and 'customer_name' in current_prices.columns:
                     final_df = current_prices[current_prices['customer_name'] != selected_customer].copy()
                 
-                # 이 거래처의 기존 데이터 중, 계속 유지할 것들만 추가
                 to_keep = original_active_products.intersection(newly_active_products)
                 if not current_prices.empty and to_keep:
                     final_df = pd.concat([final_df, current_prices[current_prices['unique_name'].isin(to_keep) & (current_prices['customer_name'] == selected_customer)]])
@@ -164,14 +172,14 @@ with tab_simulate:
         col1, col2 = st.columns(2)
         with col1:
             st.write("##### 계약 조건 (수수료, %)")
-            numeric_cols = [col for col in customer_info.index if col not in ['customer_name', 'channel_type']]
-            conditions = {col: float(customer_info.get(col, 0)) for col in numeric_cols}
+            # 이 부분은 이제 안전하게 작동합니다.
+            conditions = {col: float(customer_info.get(col, 0)) for col in NUMERIC_CLIENT_COLS}
             st.dataframe(pd.Series(conditions, name="값"), use_container_width=True)
         
         with col2:
             st.write("##### 가격 입력")
             supply_price = st.number_input(
-                "최종 공급 단가 (VAT별도)", value=float(price_info['supply_price'])
+                "최종 공급 단가 (VAT별도)", value=float(price_info.get('supply_price', 0))
             )
         
         stand_cost = float(product_info['stand_cost'])
