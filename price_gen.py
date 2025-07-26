@@ -80,19 +80,10 @@ with tab_simulate:
         if active_prices_df.empty:
             st.warning(f"'{selected_customer_sim}'이(가) 취급하는 품목이 없습니다. '거래처별 품목 관리' 탭에서 먼저 설정해주세요.")
         else:
-            # =============================== 여기가 핵심 수정 부분 ===============================
-            # 시뮬레이션에 필요한 열만 명시적으로 선택하여 merge
             prices_to_merge = active_prices_df[['unique_name', 'supply_price']]
             products_to_merge = products_df[['unique_name', 'stand_cost', 'box_ea']]
-
-            sim_df = pd.merge(
-                prices_to_merge,
-                products_to_merge,
-                on='unique_name',
-                how='inner'
-            )
-            # =================================================================================
-
+            sim_df = pd.merge(prices_to_merge, products_to_merge, on='unique_name', how='inner')
+            
             original_item_count = len(active_prices_df)
             merged_item_count = len(sim_df)
             if original_item_count > merged_item_count:
@@ -100,7 +91,7 @@ with tab_simulate:
                 merged_items = set(sim_df['unique_name'])
                 all_items = set(active_prices_df['unique_name'])
                 missing_items = all_items - merged_items
-                st.warning("아래 품목은 '제품 마스터 DB'에 없어 시뮬레이션에서 제외되었습니다. DB를 정리해주세요.")
+                st.warning("아래 품목은 '제품 마스터 DB'에 없어 시뮬레이션에서 제외되었습니다.")
                 st.dataframe({"제외된 품목": list(missing_items)})
 
             if sim_df.empty:
@@ -108,11 +99,7 @@ with tab_simulate:
             else:
                 st.markdown("---")
                 st.subheader(f"Step 1: '{selected_customer_sim}'의 공급 단가 수정")
-                st.info("아래 표의 'supply_price' 열을 더블클릭하여 가격을 직접 수정하세요.")
-                
-                # 데이터 에디터에 전달하기 전, 숫자형으로 변환
                 sim_df['supply_price'] = pd.to_numeric(sim_df['supply_price'], errors='coerce').fillna(0)
-
                 edited_df = st.data_editor(
                     sim_df[['unique_name', 'stand_cost', 'supply_price']],
                     column_config={
@@ -125,22 +112,16 @@ with tab_simulate:
 
                 st.markdown("---")
                 st.subheader("Step 2: 실시간 손익 분석 결과 확인")
-                
                 customer_info = customers_df[customers_df['customer_name'] == selected_customer_sim].iloc[0]
                 numeric_cols = [col for col in customer_info.index if col not in ['customer_name', 'channel_type']]
                 conditions = {col: float(customer_info.get(col, 0)) for col in numeric_cols}
                 total_deduction_rate = sum(conditions.values()) / 100
-
                 analysis_df = pd.merge(edited_df, products_df[['unique_name', 'box_ea']], on='unique_name', how='left')
                 analysis_df['supply_price'] = pd.to_numeric(analysis_df['supply_price'], errors='coerce').fillna(0)
-                
                 analysis_df['실정산액'] = analysis_df['supply_price'] * (1 - total_deduction_rate)
                 analysis_df['개당 이익'] = analysis_df['실정산액'] - analysis_df['stand_cost']
-                analysis_df['마진율 (%)'] = analysis_df.apply(
-                    lambda row: (row['개당 이익'] / row['실정산액'] * 100) if row['실정산액'] > 0 else 0, axis=1
-                )
+                analysis_df['마진율 (%)'] = analysis_df.apply(lambda row: (row['개당 이익'] / row['실정산액'] * 100) if row['실정산액'] > 0 else 0, axis=1)
                 analysis_df['박스당 이익'] = analysis_df['개당 이익'] * analysis_df['box_ea']
-
                 st.dataframe(
                     analysis_df[['unique_name', 'supply_price', '마진율 (%)', '개당 이익', '박스당 이익', '실정산액']],
                     column_config={
@@ -156,26 +137,26 @@ with tab_simulate:
                 st.markdown("---")
                 if st.button(f"✅ '{selected_customer_sim}'의 모든 가격 변경사항 DB에 저장", key="save_all_sim", type="primary"):
                     with st.spinner("DB에 가격 정보를 업데이트합니다..."):
-                        other_customer_prices = prices_df[prices_df['customer_name'] != selected_customer_sim].copy()
+                        # =============================== 여기가 핵심 수정 부분 (시뮬레이션 저장) ===============================
+                        # 1. DB를 다시 로드하여 최신 상태 확보
+                        _, _, current_total_prices = load_and_prep_data()
                         
-                        # 현재 거래처의 데이터는 edited_df에서 가져와서 재구성
-                        updated_data = edited_df.copy()
-                        updated_data['customer_name'] = selected_customer_sim
-                        updated_data['confirm_date'] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                        # 2. 다른 거래처 데이터는 그대로 분리
+                        other_customer_prices = current_total_prices[current_total_prices['customer_name'] != selected_customer_sim].copy()
                         
-                        # 손익 분석 결과 추가
-                        analysis_subset = analysis_df[['unique_name', '마진율 (%)', '개당 이익', '박스당 이익']]
-                        updated_data = pd.merge(updated_data, analysis_subset, on='unique_name')
-                        
-                        # DB에 저장할 최종 형태로 열 이름 변경 및 순서 정리
-                        updated_data_to_save = updated_data.rename(columns={
+                        # 3. 현재 화면에서 수정한 데이터(edited_df)를 기반으로 저장할 데이터 '재구성'
+                        updated_data_to_save = analysis_df.rename(columns={
                             '마진율 (%)': 'margin_rate',
                             '개당 이익': 'profit_per_ea',
                             '박스당 이익': 'profit_per_box'
                         })
+                        updated_data_to_save['customer_name'] = selected_customer_sim
+                        updated_data_to_save['confirm_date'] = datetime.now().strftime("%Y-%m-%d %H:%M")
                         
+                        # 4. 다른 거래처 데이터와 재구성된 현재 거래처 데이터를 합침
                         final_prices_df = pd.concat([other_customer_prices, updated_data_to_save], ignore_index=True)
 
+                        # 5. DB에 덮어쓰기
                         price_sheet = get_gsheet_client().open(PRICE_DB_NAME).worksheet("confirmed_prices")
                         set_with_dataframe(price_sheet, final_prices_df, allow_formulas=False)
                         
@@ -190,7 +171,6 @@ with tab_matrix:
     manage_customer = st.selectbox("관리할 거래처를 선택하세요", customers_df['customer_name'].unique(), key="manage_customer")
     if manage_customer:
         st.markdown(f"#### 📄 **{manage_customer}** 의 취급 품목 목록")
-        st.info("아래 목록에서 이 거래처가 취급하는 모든 품목을 체크한 후, '저장' 버튼을 누르세요.")
         active_products_set = set()
         if not prices_df.empty and 'unique_name' in prices_df.columns:
             active_products_set = set(prices_df[prices_df['customer_name'] == manage_customer]['unique_name'])
@@ -204,34 +184,42 @@ with tab_matrix:
         
         if st.button(f"✅ **{manage_customer}** 의 품목 정보 저장", use_container_width=True, type="primary"):
             with st.spinner("DB를 업데이트하는 중입니다..."):
+                # =============================== 여기가 핵심 수정 부분 (품목 관리 저장) ===============================
+                # 1. DB를 다시 로드하여 최신 상태 확보
                 _, _, current_prices = load_and_prep_data()
+
+                # 2. 다른 거래처 데이터는 그대로 분리
+                other_customer_prices = current_prices[current_prices['customer_name'] != manage_customer].copy()
+
+                # 3. 현재 체크박스 상태를 기반으로 이 거래처의 데이터를 '재구성'
                 newly_active_products = {name for name, checked in checkbox_states.items() if checked}
                 
-                original_active_products = set()
-                if not current_prices.empty and 'unique_name' in current_prices.columns:
-                    original_active_products = set(current_prices[current_prices['customer_name'] == manage_customer]['unique_name'])
+                # 재구성할 데이터를 담을 리스트
+                reconstructed_entries = []
+                for unique_name in newly_active_products:
+                    # 기존에 데이터가 있었는지 확인
+                    existing_entry = current_prices[
+                        (current_prices['customer_name'] == manage_customer) &
+                        (current_prices['unique_name'] == unique_name)
+                    ]
+                    
+                    if not existing_entry.empty:
+                        # 기존 데이터가 있으면 그대로 사용
+                        reconstructed_entries.append(existing_entry.iloc[0].to_dict())
+                    else:
+                        # 기존 데이터가 없으면 새로 생성
+                        product_info = products_df.loc[products_df['unique_name'] == unique_name].iloc[0]
+                        reconstructed_entries.append({
+                            "confirm_date": datetime.now().strftime("%Y-%m-%d %H:%M"), "unique_name": unique_name, "customer_name": manage_customer,
+                            "stand_cost": product_info['stand_cost'], "supply_price": product_info['stand_price_ea'],
+                            "margin_rate": 0, "profit_per_ea": 0, "profit_per_box": 0
+                        })
+                
+                # 4. 다른 거래처 데이터와 재구성된 현재 거래처 데이터를 합침
+                reconstructed_df = pd.DataFrame(reconstructed_entries)
+                final_df = pd.concat([other_customer_prices, reconstructed_df], ignore_index=True)
 
-                to_add = newly_active_products - original_active_products
-                
-                final_df = pd.DataFrame()
-                if not current_prices.empty:
-                    final_df = current_prices[current_prices['customer_name'] != manage_customer].copy()
-                
-                to_keep = original_active_products.intersection(newly_active_products)
-                if not current_prices.empty and to_keep:
-                    final_df = pd.concat([final_df, current_prices[current_prices['unique_name'].isin(to_keep) & (current_prices['customer_name'] == manage_customer)]])
-                
-                new_entries = []
-                for unique_name in to_add:
-                    product_info = products_df[products_df['unique_name'] == unique_name].iloc[0]
-                    new_entries.append({
-                        "confirm_date": datetime.now().strftime("%Y-%m-%d %H:%M"), "unique_name": unique_name, "customer_name": manage_customer,
-                        "stand_cost": product_info['stand_cost'], "supply_price": product_info['stand_price_ea'],
-                        "margin_rate": 0, "profit_per_ea": 0, "profit_per_box": 0
-                    })
-                
-                if new_entries: final_df = pd.concat([final_df, pd.DataFrame(new_entries)], ignore_index=True)
-                
+                # 5. DB에 덮어쓰기
                 price_sheet = get_gsheet_client().open(PRICE_DB_NAME).worksheet("confirmed_prices")
                 set_with_dataframe(price_sheet, final_df, allow_formulas=False)
                 
