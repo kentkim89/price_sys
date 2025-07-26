@@ -24,7 +24,7 @@ REQUIRED_CLIENT_COLS = [
 ]
 NUMERIC_CLIENT_COLS = [col for col in REQUIRED_CLIENT_COLS if col not in ['customer_name', 'channel_type']]
 
-# --- 구글 시트 연동 및 데이터 로딩 함수 ---
+# --- 구글 시트 연동 및 데이터 로딩 함수 (이전과 동일) ---
 def get_gsheet_client():
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scopes)
@@ -32,14 +32,13 @@ def get_gsheet_client():
 
 @st.cache_data(ttl=300)
 def load_data_from_gsheet(db_name, worksheet_name, required_cols, is_client_db=False):
-    # (이전과 동일한 함수)
     try:
         client = get_gsheet_client()
         spreadsheet = client.open(db_name)
         worksheet = spreadsheet.worksheet(worksheet_name)
         data = worksheet.get_all_records()
         df = pd.DataFrame(data)
-        if df.empty: return pd.DataFrame(columns=required_cols).fillna(0)
+        if df.empty: return pd.DataFrame(columns=required_cols)
         for col in required_cols:
             if col not in df.columns: df[col] = 0
         if is_client_db:
@@ -58,17 +57,12 @@ def load_local_data(file_path):
 # =============================== 여기가 핵심 수정 부분 ===============================
 # --- 로그인 및 회원가입 기능 ---
 def authentication_flow():
-    # 세션 상태 초기화
-    if "authenticated" not in st.session_state:
-        st.session_state.authenticated = False
-    if "page" not in st.session_state:
-        st.session_state.page = "login"
+    if "authenticated" not in st.session_state: st.session_state.authenticated = False
+    if "page" not in st.session_state: st.session_state.page = "login"
 
-    # 페이지 전환 함수
     def set_page(page):
         st.session_state.page = page
 
-    # 로그인이 되어있으면 아무것도 표시하지 않고 함수 종료
     if st.session_state.authenticated:
         return
 
@@ -80,16 +74,12 @@ def authentication_flow():
         if users_df.empty:
             st.error("사용자 DB를 불러올 수 없습니다. 관리자에게 문의하세요.")
             st.stop()
-            
+        
+        # 폼은 '로그인 제출'만을 위해 사용
         with st.form("login_form"):
             username = st.text_input("아이디").lower()
             password = st.text_input("비밀번호", type="password")
-            col1, col2 = st.columns(2)
-            with col1:
-                login_button = st.form_submit_button("로그인", use_container_width=True)
-            with col2:
-                # on_click을 사용해 버튼 클릭 시 페이지 상태 변경
-                st.form_submit_button("회원가입", on_click=set_page, args=("signup",), use_container_width=True)
+            login_button = st.form_submit_button("로그인", use_container_width=True)
 
             if login_button:
                 user_record = users_df.loc[users_df['username'] == username]
@@ -103,6 +93,12 @@ def authentication_flow():
                         st.error("아이디 또는 비밀번호가 잘못되었습니다.")
                 else:
                     st.error("아이디 또는 비밀번호가 잘못되었습니다.")
+
+        # 회원가입 버튼은 폼 바깥에 일반 버튼으로 배치
+        st.divider()
+        if st.button("계정이 없으신가요? 회원가입", use_container_width=True):
+            set_page("signup")
+            st.rerun()
 
     # --- 회원가입 페이지 ---
     elif st.session_state.page == "signup":
@@ -123,17 +119,14 @@ def authentication_flow():
                 elif not users_df.loc[users_df['username'] == new_username].empty:
                     st.error("이미 사용 중인 아이디입니다.")
                 else:
-                    # 비밀번호 해싱
                     hashed = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt())
-                    
-                    # 구글 시트에 새 사용자 추가
                     with st.spinner("계정을 생성하는 중입니다..."):
                         try:
                             client = get_gsheet_client()
                             worksheet = client.open(USER_DB_NAME).worksheet("users")
                             worksheet.append_row([new_username, hashed.decode('utf-8')])
                             st.success("회원가입이 완료되었습니다! 로그인 페이지로 이동합니다.")
-                            time.sleep(2) # 사용자가 메시지를 읽을 시간을 줌
+                            time.sleep(2)
                             set_page("login")
                             st.rerun()
                         except Exception as e:
@@ -143,26 +136,23 @@ def authentication_flow():
             set_page("login")
             st.rerun()
 
-    # 로그인이 안 된 상태에서는 앱의 나머지 부분 실행 중단
     st.stop()
 # =================================================================================
 
 # --- 메인 앱 실행 ---
-authentication_flow() # 모든 것보다 먼저 로그인/회원가입 절차 실행
+authentication_flow()
 
-# --- 이하는 로그인이 성공해야만 실행되는 코드들 ---
+# --- 이하는 로그인이 성공해야만 실행되는 코드들 (이전과 동일) ---
 CHANNEL_INFO = { "일반 도매": {"description": "용차/택배 -> 거래선 물류창고 입고", "cost_items": ["운송비 (%)"]}, "쿠팡 로켓프레시": {"description": "용차 -> 쿠팡 물류창고 입고", "cost_items": ["입고 운송비 (%)", "쿠팡 매입수수료 (%)"]}, "마트": {"description": "3PL -> 지역별 물류창고 -> 점포", "cost_items": ["3PL 기본료 (%)", "지역 간선비 (%)", "점포 배송비 (%)"]}, "프랜차이즈 본사": {"description": "용차 -> 지정 물류창고 입고", "cost_items": ["지정창고 입고비 (%)"]}, "케이터링사": {"description": "3PL -> 지역별 물류창고 (복합 수수료)", "cost_items": ["3PL 기본료 (%)", "피킹 수수료 (%)", "Zone 분류 수수료 (%)"]}, "기타 채널": {"description": "기본 배송 프로세스", "cost_items": ["기본 물류비 (%)"]} }
 customers_df = load_data_from_gsheet(CLIENT_DB_NAME, "confirmed_clients", REQUIRED_CLIENT_COLS, is_client_db=True)
 confirmed_prices_df = load_data_from_gsheet(PRICE_DB_NAME, "confirmed_prices", ['confirm_date', 'product_name', 'customer_name', 'cost_price', 'standard_price', 'supply_price', 'margin_rate', 'total_fee_rate'])
 products_df = load_local_data(PRODUCTS_FILE)
 
-# --- 사이드바 ---
 st.sidebar.title(f"환영합니다, {st.session_state.username}님!")
 if st.sidebar.button("로그아웃"):
     st.session_state.authenticated = False
     st.session_state.username = ""
     st.rerun()
-# (이하 기존 사이드바 및 메인 화면 코드는 모두 동일합니다)
 st.sidebar.markdown("---")
 with st.sidebar.expander("➕ 신규 거래처 추가"):
     with st.form("new_client_form", clear_on_submit=True):
@@ -183,7 +173,6 @@ with st.sidebar.expander("➕ 신규 거래처 추가"):
                         st.cache_data.clear()
                         st.rerun()
                     except Exception as e: st.error(f"저장 중 오류 발생: {e}")
-# ... (이하 나머지 코드는 이전 버전과 동일) ...
 st.sidebar.markdown("---")
 st.sidebar.subheader("1. 분석 대상 선택")
 selected_product_name = st.sidebar.selectbox("제품 선택", products_df['product_name'])
