@@ -5,19 +5,16 @@ from datetime import datetime
 import gspread
 from gspread_dataframe import set_with_dataframe
 from google.oauth2.service_account import Credentials
+import bcrypt
 
 # --- 페이지 설정 ---
 st.set_page_config(page_title="goremi 가격결정 시스템", page_icon="🐟", layout="wide")
 
-# --- (설정) 채널 정보 및 컬럼 정의 ---
-CHANNEL_INFO = {
-    "일반 도매": {"description": "용차/택배 -> 거래선 물류창고 입고", "cost_items": ["운송비 (%)"]},
-    "쿠팡 로켓프레시": {"description": "용차 -> 쿠팡 물류창고 입고", "cost_items": ["입고 운송비 (%)", "쿠팡 매입수수료 (%)"]},
-    "마트": {"description": "3PL -> 지역별 물류창고 -> 점포", "cost_items": ["3PL 기본료 (%)", "지역 간선비 (%)", "점포 배송비 (%)"]},
-    "프랜차이즈 본사": {"description": "용차 -> 지정 물류창고 입고", "cost_items": ["지정창고 입고비 (%)"]},
-    "케이터링사": {"description": "3PL -> 지역별 물류창고 (복합 수수료)", "cost_items": ["3PL 기본료 (%)", "피킹 수수료 (%)", "Zone 분류 수수료 (%)"]},
-    "기타 채널": {"description": "기본 배송 프로세스", "cost_items": ["기본 물류비 (%)"]}
-}
+# --- (설정) DB 정보 및 컬럼 정의 ---
+USER_DB_NAME = "Goremi Users DB"
+CLIENT_DB_NAME = "Goremi Clients DB"
+PRICE_DB_NAME = "Goremi Price DB"
+PRODUCTS_FILE = 'products.csv'
 
 REQUIRED_CLIENT_COLS = [
     'customer_name', 'channel_type', 'vendor_fee', 'discount', '운송비 (%)',
@@ -32,8 +29,8 @@ def get_gsheet_client():
     creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scopes)
     return gspread.authorize(creds)
 
-@st.cache_data(ttl=600)
-def load_data_from_gsheet(db_name, worksheet_name, required_cols):
+@st.cache_data(ttl=300)
+def load_data_from_gsheet(db_name, worksheet_name, required_cols, is_client_db=False):
     try:
         client = get_gsheet_client()
         spreadsheet = client.open(db_name)
@@ -48,19 +45,15 @@ def load_data_from_gsheet(db_name, worksheet_name, required_cols):
             if col not in df.columns:
                 df[col] = 0
         
-        # =============================== 핵심 수정 부분 ===============================
-        # 숫자여야 하는 모든 열에 대해, 숫자로 변환하고 변환할 수 없는 값(예: 빈 문자열)은 NaN으로 만듭니다.
-        numeric_cols_in_df = [col for col in NUMERIC_CLIENT_COLS if col in df.columns]
-        for col in numeric_cols_in_df:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
+        if is_client_db:
+            numeric_cols_in_df = [col for col in NUMERIC_CLIENT_COLS if col in df.columns]
+            for col in numeric_cols_in_df:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
 
-        # 전체 데이터프레임의 NaN 값을 0으로 채웁니다.
         return df.fillna(0)
-        # ==========================================================================
-
     except Exception as e:
         st.error(f"'{db_name}' DB 로딩 중 오류 발생: {e}")
-        return pd.DataFrame(columns=required_cols)
+        return pd.DataFrame()
 
 @st.cache_data
 def load_local_data(file_path):
@@ -68,31 +61,64 @@ def load_local_data(file_path):
         return pd.read_csv(file_path).fillna(0)
     return pd.DataFrame()
 
-# --- 데이터 로드 ---
-client_db_name = "Goremi Clients DB"
-price_db_name = "Goremi Price DB"
+# --- 로그인 기능 ---
+def check_login():
+    if "authenticated" not in st.session_state:
+        st.session_state.authenticated = False
 
-customers_df = load_data_from_gsheet(client_db_name, "confirmed_clients", REQUIRED_CLIENT_COLS)
-confirmed_prices_df = load_data_from_gsheet(price_db_name, "confirmed_prices", ['confirm_date', 'product_name', 'customer_name', 'cost_price', 'standard_price', 'supply_price', 'margin_rate', 'total_fee_rate'])
+    if not st.session_state.authenticated:
+        st.title("🐟 goremi 가격결정 시스템 로그인")
+        users_df = load_data_from_gsheet(USER_DB_NAME, "users", ["username", "hashed_password"])
+        
+        if users_df.empty:
+            st.error("사용자 DB를 불러올 수 없습니다. 관리자에게 문의하세요.")
+            st.stop()
+            
+        with st.form("login_form"):
+            username = st.text_input("아이디").lower()
+            password = st.text_input("비밀번호", type="password")
+            login_button = st.form_submit_button("로그인")
 
-PRODUCTS_FILE = 'products.csv'
+            if login_button:
+                user_record = users_df.loc[users_df['username'] == username]
+                if not user_record.empty:
+                    hashed_password = user_record.iloc[0]['hashed_password']
+                    if bcrypt.checkpw(password.encode('utf-8'), hashed_password.encode('utf-8')):
+                        st.session_state.authenticated = True
+                        st.session_state.username = username
+                        st.rerun()
+                    else:
+                        st.error("아이디 또는 비밀번호가 잘못되었습니다.")
+                else:
+                    st.error("아이디 또는 비밀번호가 잘못되었습니다.")
+        st.stop() # 로그인이 안되면 앱의 나머지 부분 실행 안 함
+
+# --- 메인 앱 실행 ---
+check_login() # 모든 것보다 먼저 로그인 확인
+
+# 로그인이 성공한 경우에만 아래 코드들이 실행됨
+CHANNEL_INFO = { "일반 도매": {"description": "용차/택배 -> 거래선 물류창고 입고", "cost_items": ["운송비 (%)"]}, "쿠팡 로켓프레시": {"description": "용차 -> 쿠팡 물류창고 입고", "cost_items": ["입고 운송비 (%)", "쿠팡 매입수수료 (%)"]}, "마트": {"description": "3PL -> 지역별 물류창고 -> 점포", "cost_items": ["3PL 기본료 (%)", "지역 간선비 (%)", "점포 배송비 (%)"]}, "프랜차이즈 본사": {"description": "용차 -> 지정 물류창고 입고", "cost_items": ["지정창고 입고비 (%)"]}, "케이터링사": {"description": "3PL -> 지역별 물류창고 (복합 수수료)", "cost_items": ["3PL 기본료 (%)", "피킹 수수료 (%)", "Zone 분류 수수료 (%)"]}, "기타 채널": {"description": "기본 배송 프로세스", "cost_items": ["기본 물류비 (%)"]} }
+customers_df = load_data_from_gsheet(CLIENT_DB_NAME, "confirmed_clients", REQUIRED_CLIENT_COLS, is_client_db=True)
+confirmed_prices_df = load_data_from_gsheet(PRICE_DB_NAME, "confirmed_prices", ['confirm_date', 'product_name', 'customer_name', 'cost_price', 'standard_price', 'supply_price', 'margin_rate', 'total_fee_rate'])
 products_df = load_local_data(PRODUCTS_FILE)
 
-if products_df.empty:
-    st.error(f"`{PRODUCTS_FILE}` 파일을 찾을 수 없습니다.")
-    st.stop()
-if customers_df.empty and "신규 거래처 추가" not in st.session_state: # 초기 로딩 시에만 경고
-    st.warning(f"'{client_db_name}'에서 거래처 정보를 불러오지 못했거나 비어있습니다.")
+# --- 사이드바 ---
+st.sidebar.title(f"환영합니다, {st.session_state.username}님!")
+st.sidebar.markdown("---")
+# (이하 기존 사이드바 코드와 메인 화면 코드... 동일하게 유지)
 
-# --- 사이드바 UI ---
-st.sidebar.title("📄 작업 공간")
-st.sidebar.success(f"'{client_db_name}' 및 '{price_db_name}' DB에 연결됨")
+if st.sidebar.button("로그아웃"):
+    st.session_state.authenticated = False
+    st.session_state.username = ""
+    st.rerun()
+
 st.sidebar.markdown("---")
 
 with st.sidebar.expander("➕ 신규 거래처 추가"):
+    # (신규 거래처 추가 폼 코드)
     with st.form("new_client_form", clear_on_submit=True):
-        new_customer_name = st.text_input("거래처명", key="new_name")
-        new_channel_type = st.selectbox("채널 유형", options=list(CHANNEL_INFO.keys()), key="new_channel")
+        new_customer_name = st.text_input("거래처명")
+        new_channel_type = st.selectbox("채널 유형", options=list(CHANNEL_INFO.keys()))
         submitted = st.form_submit_button("✅ 신규 거래처 저장")
 
         if submitted:
@@ -104,50 +130,34 @@ with st.sidebar.expander("➕ 신규 거래처 추가"):
                 with st.spinner("신규 거래처를 DB에 저장 중입니다..."):
                     try:
                         client = get_gsheet_client()
-                        spreadsheet = client.open(client_db_name)
-                        worksheet = spreadsheet.worksheet("confirmed_clients")
-                        
-                        new_row_dict = {col: 0.0 for col in REQUIRED_CLIENT_COLS}
-                        new_row_dict['customer_name'] = new_customer_name
-                        new_row_dict['channel_type'] = new_channel_type
-                        
-                        worksheet.append_row(list(new_row_dict.values()))
-                        
-                        st.success(f"'{new_customer_name}'이(가) 성공적으로 추가되었습니다.")
+                        worksheet = client.open(CLIENT_DB_NAME).worksheet("confirmed_clients")
+                        new_row = [new_customer_name, new_channel_type] + [0.0] * len(NUMERIC_CLIENT_COLS)
+                        worksheet.append_row(new_row, value_input_option='USER_ENTERED')
+                        st.success(f"'{new_customer_name}'이(가) 추가되었습니다.")
                         st.cache_data.clear()
-                        st.session_state.new_client_added = True
+                        st.rerun()
                     except Exception as e:
                         st.error(f"저장 중 오류 발생: {e}")
-
-if "new_client_added" in st.session_state and st.session_state.new_client_added:
-    del st.session_state.new_client_added
-    st.rerun()
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("1. 분석 대상 선택")
 selected_product_name = st.sidebar.selectbox("제품 선택", products_df['product_name'])
-selected_product = products_df[products_df['product_name'] == selected_product_name].iloc[0]
 
 if not customers_df.empty:
-    customer_list = customers_df['customer_name'].tolist()
-    # 방금 추가한 거래처가 있으면 목록 맨 앞에 오도록 정렬
-    if 'new_customer_name' in st.session_state and st.session_state.new_customer_name in customer_list:
-        customer_list.insert(0, customer_list.pop(customer_list.index(st.session_state.new_customer_name)))
-    
-    selected_customer_name = st.sidebar.selectbox("거래처 선택", customer_list)
-    selected_customer = customers_df[customers_df['customer_name'] == selected_customer_name].iloc[0]
+    selected_customer_name = st.sidebar.selectbox("거래처 선택", customers_df['customer_name'])
+    selected_product = products_df.loc[products_df['product_name'] == selected_product_name].iloc[0]
+    selected_customer = customers_df.loc[customers_df['customer_name'] == selected_customer_name].iloc[0]
 else:
-    st.sidebar.error("선택할 거래처가 없습니다. 신규 거래처를 추가해주세요.")
+    st.sidebar.error("선택할 거래처가 없습니다.")
     st.stop()
 
-# --- 세션 상태 관리 ---
+# (이하 기존 코드들 계속...)
 if 'current_customer' not in st.session_state or st.session_state.current_customer != selected_customer_name or st.session_state.current_product != selected_product_name:
     st.session_state.current_product = selected_product_name
     st.session_state.current_customer = selected_customer_name
     st.session_state.editable_cost = selected_product['cost_price']
     st.session_state.editable_standard_price = selected_product['standard_price']
     st.session_state.conditions = {col: selected_customer[col] for col in NUMERIC_CLIENT_COLS}
-
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("2. 기준 가격 시뮬레이션")
@@ -163,11 +173,11 @@ st.sidebar.subheader("3. 계산 기준 선택")
 calculation_method = st.sidebar.radio("계산 기준 선택", ('원가 기반 계산', '표준 공급가 기반 계산'))
 goremi_target_margin = st.sidebar.slider("goremi 목표 마진율 (%)", 1, 100, 30) if '원가 기반' in calculation_method else 0
 
-# --- 메인 대시보드 ---
 st.title("🐟 goremi 가격 결정 및 관리 시스템")
-tab_simulate, tab_db_view = st.tabs(["가격 시뮬레이션 & 확정", "전체 확정 DB 조회"])
+tab_simulate, tab_db_view = st.tabs(["가격 시뮬레이션 & 확정", "DB 조회"])
 
 with tab_simulate:
+    # (기존 시뮬레이션 탭 코드)
     st.header("1. 시뮬레이션 조건")
     st.markdown(f"**제품:** `{selected_product_name}` | **거래처:** `{selected_customer_name}`")
     channel_type = selected_customer['channel_type']
@@ -175,15 +185,14 @@ with tab_simulate:
     st.info(f"**채널 유형:** {channel_type} | **배송 방법:** {info['description']}")
 
     with st.container(border=True):
-        st.subheader("계약 조건 (수정 가능)")
-        cost_cols = st.columns(4) # 한 줄에 4개씩 배치
+        st.subheader("계약 조건 (수정 시 DB에 자동 반영됨)")
+        cost_cols = st.columns(4)
         idx = 0
         for key, value in st.session_state.conditions.items():
             with cost_cols[idx % 4]:
                 st.session_state.conditions[key] = st.number_input(key, value=float(value), key=f"cond_{key}")
             idx += 1
             
-    # 계산 로직
     total_deduction_rate = sum(st.session_state.conditions.values()) / 100
     cost_price, standard_price = st.session_state.editable_cost, st.session_state.editable_standard_price
     supply_price, goremi_margin = 0, 0
@@ -206,8 +215,28 @@ with tab_simulate:
 
     st.markdown("---")
     if st.button("✅ 이 가격으로 확정하고 DB에 자동 저장", type="primary", use_container_width=True):
-        # ... (가격 확정 로직은 변경 없음)
-        pass
+        with st.spinner("DB에 데이터를 저장하는 중입니다..."):
+            try:
+                client = get_gsheet_client()
+                client_sheet = client.open(CLIENT_DB_NAME).worksheet("confirmed_clients")
+                all_clients_df = load_data_from_gsheet(CLIENT_DB_NAME, "confirmed_clients", REQUIRED_CLIENT_COLS, is_client_db=True)
+                condition_keys = list(st.session_state.conditions.keys())
+                condition_values = list(st.session_state.conditions.values())
+                all_clients_df.loc[all_clients_df['customer_name'] == selected_customer_name, condition_keys] = condition_values
+                set_with_dataframe(client_sheet, all_clients_df)
+
+                price_sheet = client.open(PRICE_DB_NAME).worksheet("confirmed_prices")
+                new_price_entry = { "confirm_date": datetime.now().strftime("%Y-%m-%d %H:%M"), "product_name": selected_product_name, "customer_name": selected_customer_name, "cost_price": cost_price, "standard_price": standard_price, "supply_price": round(supply_price), "margin_rate": round(goremi_margin, 2), "total_fee_rate": round(total_deduction_rate * 100, 2) }
+                all_prices_df = load_data_from_gsheet(PRICE_DB_NAME, "confirmed_prices", list(new_price_entry.keys()))
+                new_df = pd.DataFrame([new_price_entry])
+                combined_df = pd.concat([all_prices_df, new_df]).drop_duplicates(subset=['product_name', 'customer_name'], keep='last')
+                set_with_dataframe(price_sheet, combined_df)
+
+                st.success("계약 조건 및 확정 가격이 DB에 성공적으로 저장되었습니다.")
+                st.cache_data.clear()
+                st.rerun()
+            except Exception as e:
+                st.error(f"DB 저장 중 오류 발생: {e}")
 
 with tab_db_view:
     st.header("전체 확정 가격 DB")
