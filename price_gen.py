@@ -27,9 +27,8 @@ def load_and_prep_data():
     # 제품 DB 로드 및 고유 이름 생성
     products_ws = client.open(PRODUCT_DB_NAME).worksheet("products")
     products_df = pd.DataFrame(products_ws.get_all_records())
-    # unique_name 생성 시 공백 제거 및 소문자 변환으로 일관성 유지
     products_df['unique_name'] = (
-        products_df['product_name_kr'].str.strip() + " (" +
+        products_df['product_name_kr'].astype(str).str.strip() + " (" +
         products_df['weight'].astype(str).str.strip() +
         products_df['ea_unit'].astype(str).str.strip() + ")"
     )
@@ -49,32 +48,29 @@ def load_and_prep_data():
     return products_df, clients_df, prices_df
 
 # --- 메인 앱 실행 ---
-# 비밀번호 확인 기능 제거
-
-# 데이터 로드
 try:
     products_df, customers_df, prices_df = load_and_prep_data()
 except Exception as e:
     st.error(f"데이터베이스 로딩 중 심각한 오류가 발생했습니다: {e}")
-    st.stop()
-
-if products_df.empty or customers_df.empty:
-    st.warning("제품 또는 거래처 DB가 비어있습니다. 구글 시트를 확인해주세요.")
+    st.info("구글 시트의 이름, 탭 이름, 공유 설정을 다시 확인해주세요.")
     st.stop()
 
 # =============================== 여기가 핵심 수정 부분 ===============================
-# 가격 DB에 고유 이름이 없으면 생성 (단, 가격 DB가 비어있지 않을 때만)
+# 데이터 마이그레이션을 위한 안내
 if not prices_df.empty and 'unique_name' not in prices_df.columns:
-    # merge 전에 prices_df의 키 컬럼들도 타입을 맞춰줌
-    prices_df['weight'] = prices_df['weight'].astype(str)
-    prices_df['ea_unit'] = prices_df['ea_unit'].astype(str)
-    
-    prices_df = pd.merge(
-        prices_df,
-        products_df[['product_name_kr', 'weight', 'ea_unit', 'unique_name']],
-        on=['product_name_kr', 'weight', 'ea_unit'],
-        how='left'
+    st.error("🚨 데이터베이스 구조 업데이트 필요!")
+    st.warning(
+        """
+        앱의 데이터 저장 방식이 개선되었습니다. 기존 데이터를 새 구조로 전환해야 합니다.
+        
+        **아래 절차를 따라주세요:**
+        1. **[이곳을 클릭하여 'Goremi Price DB' 시트로 이동합니다.](https://docs.google.com/spreadsheets/d/YOUR_SPREADSHEET_ID/edit)** (본인의 시트 링크로 수정하세요)
+        2. `confirmed_prices` 탭에 있는 **모든 데이터를 삭제합니다.** (헤더 행은 남겨두세요)
+        3. 앱으로 돌아와 **새로고침(F5)** 합니다.
+        4. '거래처별 품목 관리' 탭에서 취급 품목을 다시 체크하고 저장하면, 새 데이터 형식으로 정상 작동합니다.
+        """
     )
+    st.stop()
 # =================================================================================
 
 # --- UI 탭 정의 ---
@@ -84,7 +80,7 @@ tab_matrix, tab_simulate, tab_db_view = st.tabs(["거래처별 품목 관리", "
 # ==================== 거래처별 품목 관리 탭 ====================
 with tab_matrix:
     st.header("거래처별 취급 품목 설정")
-    st.info("거래처가 취급하는 품목의 체크박스를 선택하세요. 변경 후 반드시 '변경사항 저장' 버튼을 눌러야 DB에 반영됩니다.")
+    st.info("거래처가 취급하는 품목의 체크박스를 선택하거나 해제하세요. 변경 후 반드시 '변경사항 저장' 버튼을 눌러야 DB에 반영됩니다.")
 
     # 피벗 테이블 생성
     if not prices_df.empty:
@@ -104,63 +100,53 @@ with tab_matrix:
 
     if st.button("✅ 변경사항 저장", use_container_width=True, type="primary"):
         with st.spinner("DB를 업데이트하는 중입니다..."):
-            # 기존 가격 정보를 불러와서 unique_name이 있는지 확인
-            current_prices_ws = get_gsheet_client().open(PRICE_DB_NAME).worksheet("confirmed_prices")
-            current_prices = pd.DataFrame(current_prices_ws.get_all_records())
-            
-            # unique_name이 없다면 추가
-            if not current_prices.empty and 'unique_name' not in current_prices.columns:
-                 current_prices = pd.merge(current_prices, products_df[['product_name_kr', 'weight', 'ea_unit', 'unique_name']], 
-                                          on=['product_name_kr', 'weight', 'ea_unit'], how='left')
+            # 현재 DB 상태 다시 로드 (혹시 모를 동시 작업 대비)
+            _, _, current_prices = load_and_prep_data()
 
             changed_items = edited_matrix.reset_index().melt(
                 id_vars='index', var_name='customer_name', value_name='is_active'
             ).rename(columns={'index': 'unique_name'})
 
-            new_entries = []
-            active_combinations = set()
-
-            for idx, row in changed_items.iterrows():
-                if row['is_active']:
-                    # 활성화된 조합 저장
-                    active_combinations.add((row['unique_name'], row['customer_name']))
-                    
-                    # 현재 가격 DB에 해당 조합이 없는 경우에만 새로 추가
-                    exists = False
-                    if not current_prices.empty:
-                         exists = not current_prices[
-                            (current_prices['unique_name'] == row['unique_name']) &
-                            (current_prices['customer_name'] == row['customer_name'])
-                        ].empty
-                    
-                    if not exists:
-                        product_info = products_df[products_df['unique_name'] == row['unique_name']].iloc[0]
-                        new_entry = {
-                            "confirm_date": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                            "product_name_kr": product_info['product_name_kr'],
-                            "weight": product_info['weight'],
-                            "ea_unit": product_info['ea_unit'],
-                            "unique_name": row['unique_name'],
-                            "customer_name": row['customer_name'],
-                            "stand_cost": product_info['stand_cost'],
-                            "supply_price": product_info['stand_price_ea'],
-                            "margin_rate": 0, "profit_per_ea": 0, "profit_per_box": 0
-                        }
-                        new_entries.append(new_entry)
-
-            # 최종 DB = (기존 DB에서 활성화된 것만) + (새로 추가된 것)
-            final_df = pd.DataFrame()
+            # 최종적으로 DB에 있어야 할 모든 조합 (unique_name, customer_name)
+            active_combinations = set(tuple(x) for x in changed_items[changed_items['is_active']][['unique_name', 'customer_name']].to_numpy())
+            
+            # 현재 DB에 있는 조합
+            current_combinations = set()
             if not current_prices.empty:
-                # 활성화된 조합만 필터링
-                final_df = current_prices[current_prices.apply(lambda r: (r['unique_name'], r['customer_name']) in active_combinations, axis=1)]
+                current_combinations = set(tuple(x) for x in current_prices[['unique_name', 'customer_name']].to_numpy())
 
+            # 새로 추가해야 할 조합
+            to_add_combinations = active_combinations - current_combinations
+            # 유지해야 할 기존 조합
+            to_keep_combinations = active_combinations.intersection(current_combinations)
+            
+            # 유지할 데이터 필터링
+            final_df = pd.DataFrame()
+            if not current_prices.empty and to_keep_combinations:
+                final_df = current_prices[current_prices.apply(lambda r: (r['unique_name'], r['customer_name']) in to_keep_combinations, axis=1)]
+
+            # 새로 추가할 데이터 생성
+            new_entries = []
+            for unique_name, customer_name in to_add_combinations:
+                product_info = products_df[products_df['unique_name'] == unique_name].iloc[0]
+                new_entry = {
+                    "confirm_date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    "unique_name": unique_name,
+                    "customer_name": customer_name,
+                    "stand_cost": product_info['stand_cost'],
+                    "supply_price": product_info['stand_price_ea'],
+                    "margin_rate": 0, "profit_per_ea": 0, "profit_per_box": 0
+                }
+                new_entries.append(new_entry)
+
+            # 데이터 합치기
             if new_entries:
-                final_df = pd.concat([final_df, pd.DataFrame(new_entries)]).reset_index(drop=True)
-
+                final_df = pd.concat([final_df, pd.DataFrame(new_entries)], ignore_index=True)
+            
             # 구글 시트에 업데이트
             price_sheet = get_gsheet_client().open(PRICE_DB_NAME).worksheet("confirmed_prices")
-            # unique_name을 제외하고 저장 (선택사항, DB를 깔끔하게 유지)
-            set_with_dataframe(price_sheet, final_df.drop(columns=['unique_name'], errors='ignore'), allow_formulas=False)
+            # 이제 unique_name을 포함하여 저장합니다.
+            set_with_dataframe(price_sheet, final_df, allow_formulas=False)
             
             st.success("취급 품목 정보가 DB에 성공적으로 업데이트되었습니다!")
             st.cache_data.clear()
@@ -239,7 +225,8 @@ with tab_simulate:
                 prices_df.loc[idx_to_update, 'confirm_date'] = datetime.now().strftime("%Y-%m-%d %H:%M")
 
                 price_sheet = get_gsheet_client().open(PRICE_DB_NAME).worksheet("confirmed_prices")
-                set_with_dataframe(price_sheet, prices_df.drop(columns=['unique_name'], errors='ignore'), allow_formulas=False)
+                # 이제 항상 unique_name을 포함하여 저장합니다.
+                set_with_dataframe(price_sheet, prices_df, allow_formulas=False)
                 st.success("가격 정보가 성공적으로 업데이트되었습니다.")
                 st.cache_data.clear()
                 time.sleep(1)
@@ -252,4 +239,4 @@ with tab_db_view:
     st.header("거래처 목록 DB")
     st.dataframe(customers_df)
     st.header("확정 가격 DB (취급 품목 목록)")
-    st.dataframe(prices_df)
+    st.dataframe(prices_df)```
