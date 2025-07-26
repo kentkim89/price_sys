@@ -55,7 +55,6 @@ except Exception as e:
     st.info("구글 시트의 이름, 탭 이름, 공유 설정을 다시 확인해주세요.")
     st.stop()
 
-# =============================== 여기가 핵심 수정 부분 ===============================
 # 데이터 마이그레이션을 위한 안내
 if not prices_df.empty and 'unique_name' not in prices_df.columns:
     st.error("🚨 데이터베이스 구조 업데이트 필요!")
@@ -71,7 +70,6 @@ if not prices_df.empty and 'unique_name' not in prices_df.columns:
         """
     )
     st.stop()
-# =================================================================================
 
 # --- UI 탭 정의 ---
 st.title("🐟 goremi 가격 관리 시스템")
@@ -112,7 +110,7 @@ with tab_matrix:
             
             # 현재 DB에 있는 조합
             current_combinations = set()
-            if not current_prices.empty:
+            if not current_prices.empty and 'unique_name' in current_prices.columns:
                 current_combinations = set(tuple(x) for x in current_prices[['unique_name', 'customer_name']].to_numpy())
 
             # 새로 추가해야 할 조합
@@ -145,15 +143,12 @@ with tab_matrix:
             
             # 구글 시트에 업데이트
             price_sheet = get_gsheet_client().open(PRICE_DB_NAME).worksheet("confirmed_prices")
-            # 이제 unique_name을 포함하여 저장합니다.
             set_with_dataframe(price_sheet, final_df, allow_formulas=False)
             
             st.success("취급 품목 정보가 DB에 성공적으로 업데이트되었습니다!")
             st.cache_data.clear()
             time.sleep(1)
             st.rerun()
-
-# (이하 가격 시뮬레이션 탭 및 DB 조회 탭 코드는 이전 버전과 거의 동일하게 유지)
 
 # ==================== 가격 시뮬레이션 탭 ====================
 with tab_simulate:
@@ -177,7 +172,16 @@ with tab_simulate:
         
         product_info = products_df[products_df['unique_name'] == selected_product_sim].iloc[0]
         customer_info = customers_df[customers_df['customer_name'] == selected_customer_sim].iloc[0]
-        price_info = prices_df[(prices_df['unique_name'] == selected_product_sim) & (prices_df['customer_name'] == selected_customer_sim)].iloc[0]
+        
+        # price_info를 찾을 때, prices_df가 비어있지 않은지 확인
+        if not prices_df.empty:
+            price_info_rows = prices_df[(prices_df['unique_name'] == selected_product_sim) & (prices_df['customer_name'] == selected_customer_sim)]
+            if not price_info_rows.empty:
+                price_info = price_info_rows.iloc[0]
+            else: # 혹시 모를 예외 처리: prices_df에 해당 조합이 없는 경우
+                price_info = pd.Series({'supply_price': product_info['stand_price_ea']}) # 기본값 설정
+        else:
+            price_info = pd.Series({'supply_price': product_info['stand_price_ea']})
 
         st.markdown("---")
         st.subheader(f"'{selected_product_sim}' - '{selected_customer_sim}'")
@@ -225,7 +229,6 @@ with tab_simulate:
                 prices_df.loc[idx_to_update, 'confirm_date'] = datetime.now().strftime("%Y-%m-%d %H:%M")
 
                 price_sheet = get_gsheet_client().open(PRICE_DB_NAME).worksheet("confirmed_prices")
-                # 이제 항상 unique_name을 포함하여 저장합니다.
                 set_with_dataframe(price_sheet, prices_df, allow_formulas=False)
                 st.success("가격 정보가 성공적으로 업데이트되었습니다.")
                 st.cache_data.clear()
@@ -239,4 +242,4 @@ with tab_db_view:
     st.header("거래처 목록 DB")
     st.dataframe(customers_df)
     st.header("확정 가격 DB (취급 품목 목록)")
-    st.dataframe(prices_df)```
+    st.dataframe(prices_df)
