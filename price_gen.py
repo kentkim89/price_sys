@@ -126,12 +126,14 @@ with tab_simulate:
                 # 2. '기준가 대비 차액'을 표시할 문자열을 만드는 함수 정의
                 def format_difference(row):
                     difference = row['실정산액'] - row['stand_price_ea']
-                    # 기준 도매가가 0일 경우 ZeroDivisionError 방지
                     if row['stand_price_ea'] > 0:
                         percentage = (difference / row['stand_price_ea']) * 100
-                        return f"{difference:+,d}원 ({percentage:+.1f}%)"
+                        # =============================== 여기가 핵심 수정 부분 ===============================
+                        # :d (정수) -> :+.0f (부호가 있는 소수점 0자리 실수)로 변경하여 에러 해결
+                        return f"{difference:+, .0f}원 ({percentage:+.1f}%)"
                     else:
-                        return f"{difference:+,d}원 (N/A)"
+                        return f"{difference:+, .0f}원 (N/A)"
+                # =====================================================================================
 
                 # 3. 위 함수를 적용하여 '기준가 대비 차액' 컬럼 생성
                 analysis_df['기준가 대비 차액'] = analysis_df.apply(format_difference, axis=1)
@@ -153,7 +155,6 @@ with tab_simulate:
                         "stand_price_ea": st.column_config.NumberColumn("기준 도매가", format="%d원"),
                         "supply_price": st.column_config.NumberColumn("공급 단가", format="%d원"),
                         "실정산액": st.column_config.NumberColumn("실정산액", format="%d원"),
-                        # TextColumn으로 변경하여 포맷된 문자열을 그대로 표시
                         "기준가 대비 차액": st.column_config.TextColumn("기준가 대비 차액"),
                         "마진율 (%)": st.column_config.NumberColumn("마진율", format="%.1f%%"),
                         "개당 이익": st.column_config.NumberColumn("개당 이익", format="%d원"),
@@ -165,13 +166,8 @@ with tab_simulate:
                 st.markdown("---")
                 if st.button(f"✅ '{selected_customer_sim}'의 모든 가격 변경사항 DB에 저장", key="save_all_sim", type="primary"):
                     with st.spinner("DB에 가격 정보를 업데이트합니다..."):
-                        # DB를 다시 로드하여 최신 상태 확보
                         _, _, current_total_prices = load_and_prep_data()
-                        
-                        # 다른 거래처 데이터는 그대로 분리
                         other_customer_prices = current_total_prices[current_total_prices['customer_name'] != selected_customer_sim].copy()
-                        
-                        # 현재 화면에서 수정한 데이터를 기반으로 저장할 데이터 '재구성'
                         updated_data_to_save = analysis_df.rename(columns={
                             '마진율 (%)': 'margin_rate',
                             '개당 이익': 'profit_per_ea',
@@ -179,21 +175,17 @@ with tab_simulate:
                         })
                         updated_data_to_save['customer_name'] = selected_customer_sim
                         updated_data_to_save['confirm_date'] = datetime.now().strftime("%Y-%m-%d %H:%M")
-                        
-                        # 저장할 최종 컬럼만 선택 (분석용 컬럼 제외)
+
                         if not current_total_prices.empty:
                             save_columns = list(current_total_prices.columns)
                             final_save_df = updated_data_to_save[[col for col in save_columns if col in updated_data_to_save.columns]]
-                        else: # 가격 DB가 비어있을 때를 대비
+                        else:
                             final_save_df = updated_data_to_save
-                        
-                        # 다른 거래처 데이터와 재구성된 현재 거래처 데이터를 합침
-                        final_prices_df = pd.concat([other_customer_prices, final_save_df], ignore_index=True)
 
-                        # DB에 덮어쓰기
+                        final_prices_df = pd.concat([other_customer_prices, final_save_df], ignore_index=True)
                         price_sheet = get_gsheet_client().open(PRICE_DB_NAME).worksheet("confirmed_prices")
                         set_with_dataframe(price_sheet, final_prices_df, allow_formulas=False)
-                        
+
                         st.success(f"'{selected_customer_sim}'의 가격 정보가 성공적으로 업데이트되었습니다.")
                         st.cache_data.clear()
                         time.sleep(1)
@@ -211,54 +203,40 @@ with tab_matrix:
             active_products_set = set()
             if not prices_df.empty and 'unique_name' in prices_df.columns:
                 active_products_set = set(prices_df[prices_df['customer_name'] == manage_customer]['unique_name'])
-            
+
             checkbox_states = {}
             for _, product in products_df.iterrows():
                 is_checked = product['unique_name'] in active_products_set
                 checkbox_states[product['unique_name']] = st.checkbox(
                     product['unique_name'], value=is_checked, key=f"check_{manage_customer}_{product['unique_name']}"
                 )
-            
+
             if st.button(f"✅ **{manage_customer}** 의 품목 정보 저장", use_container_width=True, type="primary"):
                 with st.spinner("DB를 업데이트하는 중입니다..."):
-                    # DB를 다시 로드하여 최신 상태 확보
                     _, _, current_prices = load_and_prep_data()
-
-                    # 다른 거래처 데이터는 그대로 분리
                     other_customer_prices = current_prices[current_prices['customer_name'] != manage_customer].copy()
-
-                    # 현재 체크박스 상태를 기반으로 이 거래처의 데이터를 '재구성'
                     newly_active_products = {name for name, checked in checkbox_states.items() if checked}
-                    
-                    # 재구성할 데이터를 담을 리스트
                     reconstructed_entries = []
                     for unique_name in newly_active_products:
-                        # 기존에 데이터가 있었는지 확인
                         existing_entry = current_prices[
                             (current_prices['customer_name'] == manage_customer) &
                             (current_prices['unique_name'] == unique_name)
                         ]
-                        
                         if not existing_entry.empty:
-                            # 기존 데이터가 있으면 그대로 사용
                             reconstructed_entries.append(existing_entry.iloc[0].to_dict())
                         else:
-                            # 기존 데이터가 없으면 새로 생성
                             product_info = products_df.loc[products_df['unique_name'] == unique_name].iloc[0]
                             reconstructed_entries.append({
                                 "confirm_date": datetime.now().strftime("%Y-%m-%d %H:%M"), "unique_name": unique_name, "customer_name": manage_customer,
                                 "stand_cost": product_info['stand_cost'], "supply_price": product_info['stand_price_ea'],
                                 "margin_rate": 0, "profit_per_ea": 0, "profit_per_box": 0
                             })
-                    
-                    # 다른 거래처 데이터와 재구성된 현재 거래처 데이터를 합침
+
                     reconstructed_df = pd.DataFrame(reconstructed_entries)
                     final_df = pd.concat([other_customer_prices, reconstructed_df], ignore_index=True)
-
-                    # DB에 덮어쓰기
                     price_sheet = get_gsheet_client().open(PRICE_DB_NAME).worksheet("confirmed_prices")
                     set_with_dataframe(price_sheet, final_df, allow_formulas=False)
-                    
+
                     st.success(f"'{manage_customer}'의 취급 품목 정보가 DB에 성공적으로 업데이트되었습니다!")
                     st.cache_data.clear()
                     time.sleep(1)
