@@ -96,23 +96,17 @@ with tab_simulate:
                 st.markdown("---")
                 st.subheader(f"Step 1: '{selected_customer_sim}'의 공급 단가 수정")
                 
-                # =============================== 여기가 핵심 수정 부분 ===============================
-                # key를 선택된 고객별로 동적으로 할당합니다.
-                # 이렇게 하면 고객을 바꾸기 전까지는 data_editor의 상태가 유지됩니다.
                 edited_df = st.data_editor(
-                    sim_df, # 초기 데이터는 DB에서 불러온 sim_df를 사용합니다.
+                    sim_df,
                     column_config={
                         "unique_name": st.column_config.TextColumn("품목명", disabled=True),
                         "stand_cost": st.column_config.NumberColumn("제품 원가", format="%d원", disabled=True),
                         "supply_price": st.column_config.NumberColumn("최종 공급 단가", format="%d원", required=True),
-                        # 분석에만 필요한 컬럼은 여기서 숨깁니다.
-                        "stand_price_ea": None,
-                        "box_ea": None,
+                        "stand_price_ea": None, "box_ea": None,
                     },
                     hide_index=True, use_container_width=True,
-                    key=f"price_editor_{selected_customer_sim}" # 고객별 동적 키 할당
+                    key=f"price_editor_{selected_customer_sim}"
                 )
-                # =========================================================================================
 
                 st.markdown("---")
                 st.subheader("Step 2: 실시간 손익 분석 결과 확인")
@@ -124,24 +118,30 @@ with tab_simulate:
                 if trunk_fee_rate > 0:
                     apply_trunk_fee = st.checkbox(f"**지역 간선비 적용 (비율: {trunk_fee_rate:,.1f}%)**", key=f"apply_trunk_fee_{selected_customer_sim}")
 
-                numeric_cols = [col for col in customer_info.index if col not in ['customer_name', 'channel_type', '지역 간선비 (%)']]
-                conditions = {col: float(customer_info.get(col, 0)) for col in numeric_cols}
-                total_deduction_rate = sum(conditions.values()) / 100
+                # =============================== 여기가 핵심 수정 부분 ===============================
+                # 1. 기타 수수료율 계산
+                other_fee_cols = [col for col in customer_info.index if col not in ['customer_name', 'channel_type', '지역 간선비 (%)']]
+                other_fee_conditions = {col: float(customer_info.get(col, 0)) for col in other_fee_cols}
+                other_fee_rate = sum(other_fee_conditions.values()) / 100
+
+                # 2. 최종 공제율 계산 (기타 수수료율 + 간선비율)
+                final_deduction_rate = other_fee_rate
+                if apply_trunk_fee:
+                    final_deduction_rate += (trunk_fee_rate / 100)
                 
-                analysis_df = edited_df.copy() # 이제 edited_df가 항상 최신 상태이므로 그대로 사용합니다.
-                
+                # 3. 분석에 사용할 데이터프레임 복사 및 타입 정리
+                analysis_df = edited_df.copy()
                 analysis_df['supply_price'] = pd.to_numeric(analysis_df['supply_price'], errors='coerce').fillna(0)
                 analysis_df['stand_price_ea'] = pd.to_numeric(analysis_df['stand_price_ea'], errors='coerce').fillna(0)
                 
-                analysis_df['실정산액'] = analysis_df['supply_price'] * (1 - total_deduction_rate)
-
-                if apply_trunk_fee:
-                    analysis_df['적용된 간선비'] = analysis_df['supply_price'] * (trunk_fee_rate / 100)
-                else:
-                    analysis_df['적용된 간선비'] = 0
+                # 4. 최종 공제율을 사용하여 '실정산액' 계산
+                analysis_df['실정산액'] = analysis_df['supply_price'] * (1 - final_deduction_rate)
                 
-                analysis_df['개당 이익'] = analysis_df['실정산액'] - analysis_df['stand_cost'] - analysis_df['적용된 간선비']
+                # 5. 이제 '개당 이익'은 올바르게 계산된 '실정산액'에서 원가만 빼면 됨
+                analysis_df['개당 이익'] = analysis_df['실정산액'] - analysis_df['stand_cost']
+                # =========================================================================================
 
+                # 이하 다른 계산들은 자동으로 올바르게 연동됨
                 def format_difference(row):
                     difference = row['실정산액'] - row['stand_price_ea']
                     if row['stand_price_ea'] > 0:
@@ -181,6 +181,7 @@ with tab_simulate:
 
                         if not current_total_prices.empty:
                             save_columns = list(current_total_prices.columns)
+                            # 분석에만 사용된 컬럼은 저장하지 않도록 필터링
                             final_save_df = updated_data_to_save[[col for col in save_columns if col in updated_data_to_save.columns]]
                         else:
                             final_save_df = updated_data_to_save
