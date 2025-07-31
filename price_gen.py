@@ -28,7 +28,7 @@ def load_and_prep_data():
     )
     for col in ['stand_cost', 'stand_price_ea', 'box_ea']:
         products_df[col] = pd.to_numeric(
-            products_df[col].astype(str).str.replace(',', ''), errors='coerce'
+            products_df[col].astype(str).str.replace(',', '', regex=False), errors='coerce'
         )
     products_df = products_df.fillna(0).sort_values(by='unique_name').reset_index(drop=True)
 
@@ -95,15 +95,24 @@ with tab_simulate:
             else:
                 st.markdown("---")
                 st.subheader(f"Step 1: '{selected_customer_sim}'의 공급 단가 수정")
+                
+                # =============================== 여기가 핵심 수정 부분 ===============================
+                # key를 선택된 고객별로 동적으로 할당합니다.
+                # 이렇게 하면 고객을 바꾸기 전까지는 data_editor의 상태가 유지됩니다.
                 edited_df = st.data_editor(
-                    sim_df[['unique_name', 'stand_cost', 'supply_price']],
+                    sim_df, # 초기 데이터는 DB에서 불러온 sim_df를 사용합니다.
                     column_config={
                         "unique_name": st.column_config.TextColumn("품목명", disabled=True),
                         "stand_cost": st.column_config.NumberColumn("제품 원가", format="%d원", disabled=True),
                         "supply_price": st.column_config.NumberColumn("최종 공급 단가", format="%d원", required=True),
+                        # 분석에만 필요한 컬럼은 여기서 숨깁니다.
+                        "stand_price_ea": None,
+                        "box_ea": None,
                     },
-                    hide_index=True, use_container_width=True, key="price_editor"
+                    hide_index=True, use_container_width=True,
+                    key=f"price_editor_{selected_customer_sim}" # 고객별 동적 키 할당
                 )
+                # =========================================================================================
 
                 st.markdown("---")
                 st.subheader("Step 2: 실시간 손익 분석 결과 확인")
@@ -113,22 +122,17 @@ with tab_simulate:
 
                 apply_trunk_fee = False
                 if trunk_fee_rate > 0:
-                    apply_trunk_fee = st.checkbox(f"**지역 간선비 적용 (비율: {trunk_fee_rate:,.1f}%)**", key="apply_trunk_fee")
-
-                # =============================== 여기가 핵심 수정 부분 (디버깅 코드) ===============================
-                # Streamlit은 스크립트를 다시 실행하므로, 변수의 현재 상태를 명시적으로 출력하여 확인합니다.
-                st.info(f"체크박스 현재 상태: `{apply_trunk_fee}`")
-                # =========================================================================================
+                    apply_trunk_fee = st.checkbox(f"**지역 간선비 적용 (비율: {trunk_fee_rate:,.1f}%)**", key=f"apply_trunk_fee_{selected_customer_sim}")
 
                 numeric_cols = [col for col in customer_info.index if col not in ['customer_name', 'channel_type', '지역 간선비 (%)']]
                 conditions = {col: float(customer_info.get(col, 0)) for col in numeric_cols}
                 total_deduction_rate = sum(conditions.values()) / 100
                 
-                # .copy()를 추가하여 혹시 모를 캐시 문제를 방지합니다.
-                analysis_df = pd.merge(edited_df, products_df[['unique_name', 'stand_price_ea', 'box_ea']], on='unique_name', how='left').copy()
+                analysis_df = edited_df.copy() # 이제 edited_df가 항상 최신 상태이므로 그대로 사용합니다.
                 
                 analysis_df['supply_price'] = pd.to_numeric(analysis_df['supply_price'], errors='coerce').fillna(0)
                 analysis_df['stand_price_ea'] = pd.to_numeric(analysis_df['stand_price_ea'], errors='coerce').fillna(0)
+                
                 analysis_df['실정산액'] = analysis_df['supply_price'] * (1 - total_deduction_rate)
 
                 if apply_trunk_fee:
@@ -150,16 +154,12 @@ with tab_simulate:
                 analysis_df['마진율 (%)'] = analysis_df.apply(lambda row: (row['개당 이익'] / row['실정산액'] * 100) if row['실정산액'] > 0 else 0, axis=1)
                 analysis_df['박스당 이익'] = analysis_df['개당 이익'] * analysis_df['box_ea']
 
-                # =============================== 여기가 핵심 수정 부분 (디버깅 코드) ===============================
-                total_profit = analysis_df['개당 이익'].sum()
-                st.info(f"계산된 총 '개당 이익'의 합계: `{total_profit:,.0f}` 원")
-                # =========================================================================================
-
                 display_cols = ['unique_name', 'stand_price_ea', 'supply_price', '실정산액', '기준가 대비 차액', '마진율 (%)', '개당 이익', '박스당 이익']
                 st.dataframe(
                     analysis_df[display_cols],
                     column_config={
-                        "unique_name": "품목명", "stand_price_ea": st.column_config.NumberColumn("기준 도매가", format="%d원"),
+                        "unique_name": "품목명",
+                        "stand_price_ea": st.column_config.NumberColumn("기준 도매가", format="%d원"),
                         "supply_price": st.column_config.NumberColumn("공급 단가", format="%d원"),
                         "실정산액": st.column_config.NumberColumn("실정산액", format="%d원"),
                         "기준가 대비 차액": st.column_config.TextColumn("기준가 대비 차액"),
@@ -187,29 +187,33 @@ with tab_simulate:
 
                         final_prices_df = pd.concat([other_customer_prices, final_save_df], ignore_index=True)
                         price_sheet = get_gsheet_client().open(PRICE_DB_NAME).worksheet("confirmed_prices")
-                        set_with_dataframe(price_sheet, final_df, allow_formulas=False)
+                        set_with_dataframe(price_sheet, final_prices_df, allow_formulas=False)
 
                         st.success(f"'{selected_customer_sim}'의 가격 정보가 성공적으로 업데이트되었습니다.")
                         st.cache_data.clear()
                         time.sleep(1)
                         st.rerun()
 
-# (이하 tab_matrix, tab_db_view 코드는 동일하여 생략)
+# ==================== 거래처별 품목 관리 탭 ====================
 with tab_matrix:
     st.header("거래처별 취급 품목 설정")
-    if not customers_df.empty:
+    if customers_df.empty:
+        st.warning("등록된 거래처가 없습니다.")
+    else:
         manage_customer = st.selectbox("관리할 거래처를 선택하세요", customers_df['customer_name'].unique(), key="manage_customer")
         if manage_customer:
             st.markdown(f"#### 📄 **{manage_customer}** 의 취급 품목 목록")
             active_products_set = set()
             if not prices_df.empty and 'unique_name' in prices_df.columns:
                 active_products_set = set(prices_df[prices_df['customer_name'] == manage_customer]['unique_name'])
-            
+
             checkbox_states = {}
             for _, product in products_df.iterrows():
                 is_checked = product['unique_name'] in active_products_set
-                checkbox_states[product['unique_name']] = st.checkbox(product['unique_name'], value=is_checked, key=f"check_{manage_customer}_{product['unique_name']}")
-            
+                checkbox_states[product['unique_name']] = st.checkbox(
+                    product['unique_name'], value=is_checked, key=f"check_{manage_customer}_{product['unique_name']}"
+                )
+
             if st.button(f"✅ **{manage_customer}** 의 품목 정보 저장", use_container_width=True, type="primary"):
                 with st.spinner("DB를 업데이트하는 중입니다..."):
                     _, _, current_prices = load_and_prep_data()
@@ -217,7 +221,10 @@ with tab_matrix:
                     newly_active_products = {name for name, checked in checkbox_states.items() if checked}
                     reconstructed_entries = []
                     for unique_name in newly_active_products:
-                        existing_entry = current_prices[(current_prices['customer_name'] == manage_customer) & (current_prices['unique_name'] == unique_name)]
+                        existing_entry = current_prices[
+                            (current_prices['customer_name'] == manage_customer) &
+                            (current_prices['unique_name'] == unique_name)
+                        ]
                         if not existing_entry.empty:
                             reconstructed_entries.append(existing_entry.iloc[0].to_dict())
                         else:
@@ -227,16 +234,18 @@ with tab_matrix:
                                 "stand_cost": product_info['stand_cost'], "supply_price": product_info['stand_price_ea'],
                                 "margin_rate": 0, "profit_per_ea": 0, "profit_per_box": 0
                             })
-                    
+
                     reconstructed_df = pd.DataFrame(reconstructed_entries)
                     final_df = pd.concat([other_customer_prices, reconstructed_df], ignore_index=True)
                     price_sheet = get_gsheet_client().open(PRICE_DB_NAME).worksheet("confirmed_prices")
                     set_with_dataframe(price_sheet, final_df, allow_formulas=False)
+
                     st.success(f"'{manage_customer}'의 취급 품목 정보가 DB에 성공적으로 업데이트되었습니다!")
                     st.cache_data.clear()
                     time.sleep(1)
                     st.rerun()
 
+# ==================== DB 원본 조회 탭 ====================
 with tab_db_view:
     st.header("제품 마스터 DB")
     st.dataframe(products_df)
