@@ -129,10 +129,10 @@ with tab_simulate:
                     if row['stand_price_ea'] > 0:
                         percentage = (difference / row['stand_price_ea']) * 100
                         # =============================== 여기가 핵심 수정 부분 ===============================
-                        # 충돌하는 부호 지정자인 공백(' ')을 제거합니다.
-                        return f"{difference:+, .0f}원 ({percentage:+.1f}%)"
+                        # 부호 지정자인 '+'와 ',' 사이의 공백을 제거하여 에러를 해결합니다.
+                        return f"{difference:+,.0f}원 ({percentage:+.1f}%)"
                     else:
-                        return f"{difference:+, .0f}원 (N/A)"
+                        return f"{difference:+,.0f}원 (N/A)"
                 # =====================================================================================
 
                 # 3. 위 함수를 적용하여 '기준가 대비 차액' 컬럼 생성
