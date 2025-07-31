@@ -115,41 +115,41 @@ with tab_simulate:
                 st.subheader("Step 2: 실시간 손익 분석 결과 확인")
                 customer_info = customers_df[customers_df['customer_name'] == selected_customer_sim].iloc[0]
 
-                # =============================== 여기가 디버깅 코드 시작점 ===============================
-                with st.expander("🔍 디버깅 정보 확인하기 (문제가 해결되면 이 부분은 삭제하세요)"):
-                    st.write("선택된 거래처의 전체 정보입니다. '지역간선비' 컬럼과 값이 올바른지 확인하세요.")
-                    st.json(customer_info.to_dict())
-                    
-                    # 1. 거래처의 '지역간선비' 값을 가져옴 (없으면 0)
-                    #    ※ 중요: 거래처 DB의 컬럼명이 '지역간선비'가 아니면 이 부분을 수정해야 합니다.
-                    trunk_fee = float(customer_info.get('지역간선비', 0))
-                    
-                    st.write(f"코드에서 인식한 '지역간선비' 컬럼명: `지역간선비`")
-                    st.write(f"코드에서 인식한 간선비 금액: `{trunk_fee}`")
-                    
-                    if trunk_fee > 0:
-                        st.success("간선비 금액이 0보다 크므로, 아래에 체크박스가 표시되어야 합니다.")
-                    else:
-                        st.error("간선비 금액이 0이거나 없으므로, 체크박스가 표시되지 않습니다.")
-                # =============================== 여기가 디버깅 코드 끝점 ===================================
+                # =============================== 여기가 핵심 수정 부분 (간선비 % 적용) ===============================
+                # 1. 거래처의 '지역 간선비(%)' 비율 값을 가져옴 (없으면 0)
+                #    ※ 시트의 실제 컬럼명과 정확히 일치해야 합니다.
+                trunk_fee_rate = float(customer_info.get('지역 간선비(%)', 0))
+
+                # 2. '지역 간선비(%)' 적용 여부를 결정할 체크박스 생성
+                apply_trunk_fee = False
+                if trunk_fee_rate > 0:
+                    # 체크박스의 라벨을 비율(%)로 표시하도록 수정
+                    apply_trunk_fee = st.checkbox(f"**지역 간선비 적용 (비율: {trunk_fee_rate:,.1f}%)**", key="apply_trunk_fee")
                 
-                numeric_cols = [col for col in customer_info.index if col not in ['customer_name', 'channel_type', '지역간선비']]
+                # '기타 수수료' 등 간선비 외의 공제 항목 계산
+                numeric_cols = [col for col in customer_info.index if col not in ['customer_name', 'channel_type', '지역 간선비(%)']]
                 conditions = {col: float(customer_info.get(col, 0)) for col in numeric_cols}
                 total_deduction_rate = sum(conditions.values()) / 100
                 
-                # '지역간선비' 적용 여부를 결정할 체크박스 생성
-                apply_trunk_fee = False
-                if trunk_fee > 0:
-                    apply_trunk_fee = st.checkbox(f"**지역 간선비 적용 (금액: {trunk_fee:,.0f}원)**", key="apply_trunk_fee")
-                
-                # 체크박스 상태에 따라 실제로 적용할 간선비 금액 결정
-                fee_to_apply = trunk_fee if apply_trunk_fee else 0
-
                 # 분석에 필요한 DataFrame 생성
                 analysis_df = pd.merge(edited_df, products_df[['unique_name', 'stand_price_ea', 'box_ea']], on='unique_name', how='left')
                 analysis_df['supply_price'] = pd.to_numeric(analysis_df['supply_price'], errors='coerce').fillna(0)
                 analysis_df['stand_price_ea'] = pd.to_numeric(analysis_df['stand_price_ea'], errors='coerce').fillna(0)
+                
+                # '실정산액'은 간선비를 제외한 기타 수수료만 먼저 적용
                 analysis_df['실정산액'] = analysis_df['supply_price'] * (1 - total_deduction_rate)
+
+                # 3. 체크박스 상태에 따라 품목별 간선비 금액을 계산
+                if apply_trunk_fee:
+                    # 공급단가에 간선비 비율을 곱하여 품목별 간선비 계산
+                    analysis_df['적용된 간선비'] = analysis_df['supply_price'] * (trunk_fee_rate / 100)
+                else:
+                    # 체크 안 하면 간선비는 0
+                    analysis_df['적용된 간선비'] = 0
+                
+                # 4. '개당 이익' 계산 시, '적용된 간선비'를 추가로 차감
+                analysis_df['개당 이익'] = analysis_df['실정산액'] - analysis_df['stand_cost'] - analysis_df['적용된 간선비']
+                # =========================================================================================
 
                 def format_difference(row):
                     difference = row['실정산액'] - row['stand_price_ea']
@@ -160,10 +160,6 @@ with tab_simulate:
                         return f"{difference:+,.0f}원 (N/A)"
 
                 analysis_df['기준가 대비 차액'] = analysis_df.apply(format_difference, axis=1)
-                
-                # '개당 이익' 계산 시, 적용하기로 한 간선비(fee_to_apply)를 추가로 차감
-                analysis_df['개당 이익'] = analysis_df['실정산액'] - analysis_df['stand_cost'] - fee_to_apply
-                
                 analysis_df['마진율 (%)'] = analysis_df.apply(lambda row: (row['개당 이익'] / row['실정산액'] * 100) if row['실정산액'] > 0 else 0, axis=1)
                 analysis_df['박스당 이익'] = analysis_df['개당 이익'] * analysis_df['box_ea']
 
