@@ -81,7 +81,6 @@ with tab_simulate:
             st.warning(f"'{selected_customer_sim}'이(가) 취급하는 품목이 없습니다. '거래처별 품목 관리' 탭에서 먼저 설정해주세요.")
         else:
             prices_to_merge = active_prices_df[['unique_name', 'supply_price']]
-            # stand_price_ea도 함께 가져오도록 수정
             products_to_merge = products_df[['unique_name', 'stand_cost', 'stand_price_ea', 'box_ea']]
             sim_df = pd.merge(prices_to_merge, products_to_merge, on='unique_name', how='inner')
 
@@ -117,24 +116,33 @@ with tab_simulate:
                 numeric_cols = [col for col in customer_info.index if col not in ['customer_name', 'channel_type']]
                 conditions = {col: float(customer_info.get(col, 0)) for col in numeric_cols}
                 total_deduction_rate = sum(conditions.values()) / 100
-                
+
                 # =============================== 여기가 핵심 수정 부분 (Step 2 분석) ===============================
-                # 1. products_df에서 필요한 전체 컬럼('unique_name', 'stand_price_ea', 'box_ea')을 가져와서 merge
+                # 1. 분석에 필요한 DataFrame 생성
                 analysis_df = pd.merge(edited_df, products_df[['unique_name', 'stand_price_ea', 'box_ea']], on='unique_name', how='left')
-                
-                # 2. 분석에 필요한 컬럼들 계산
                 analysis_df['supply_price'] = pd.to_numeric(analysis_df['supply_price'], errors='coerce').fillna(0)
                 analysis_df['stand_price_ea'] = pd.to_numeric(analysis_df['stand_price_ea'], errors='coerce').fillna(0)
                 analysis_df['실정산액'] = analysis_df['supply_price'] * (1 - total_deduction_rate)
-                
-                # 3. (신규) '기준가 대비 차액' 컬럼 추가
-                analysis_df['기준가 대비 차액'] = analysis_df['실정산액'] - analysis_df['stand_price_ea']
-                
+
+                # 2. (신규) '기준가 대비 차액'을 표시할 문자열을 만드는 함수 정의
+                def format_difference(row):
+                    difference = row['실정산액'] - row['stand_price_ea']
+                    # 기준 도매가가 0일 경우 ZeroDivisionError 방지
+                    if row['stand_price_ea'] > 0:
+                        percentage = (difference / row['stand_price_ea']) * 100
+                        return f"{difference:+,d}원 ({percentage:+.1f}%)"
+                    else:
+                        return f"{difference:+,d}원 (N/A)"
+
+                # 3. (신규) 위 함수를 적용하여 '기준가 대비 차액 (금액 + %)' 컬럼 생성
+                analysis_df['기준가 대비 차액'] = analysis_df.apply(format_difference, axis=1)
+
+                # 4. 나머지 분석 컬럼들 계산
                 analysis_df['개당 이익'] = analysis_df['실정산액'] - analysis_df['stand_cost']
                 analysis_df['마진율 (%)'] = analysis_df.apply(lambda row: (row['개당 이익'] / row['실정산액'] * 100) if row['실정산액'] > 0 else 0, axis=1)
                 analysis_df['박스당 이익'] = analysis_df['개당 이익'] * analysis_df['box_ea']
-                
-                # 4. 화면에 표시할 컬럼 순서 재정의 및 컬럼 설정
+
+                # 5. 화면에 표시할 컬럼 순서 및 컬럼 설정 정의
                 display_cols = [
                     'unique_name', 'stand_price_ea', 'supply_price', '실정산액', '기준가 대비 차액',
                     '마진율 (%)', '개당 이익', '박스당 이익'
@@ -146,7 +154,8 @@ with tab_simulate:
                         "stand_price_ea": st.column_config.NumberColumn("기준 도매가", format="%d원"),
                         "supply_price": st.column_config.NumberColumn("공급 단가", format="%d원"),
                         "실정산액": st.column_config.NumberColumn("실정산액", format="%d원"),
-                        "기준가 대비 차액": st.column_config.NumberColumn("기준가 대비 차액", format="%+d원"),
+                        # TextColumn으로 변경하여 포맷된 문자열을 그대로 표시
+                        "기준가 대비 차액": st.column_config.TextColumn("기준가 대비 차액"),
                         "마진율 (%)": st.column_config.NumberColumn("마진율", format="%.1f%%"),
                         "개당 이익": st.column_config.NumberColumn("개당 이익", format="%d원"),
                         "박스당 이익": st.column_config.NumberColumn("박스당 이익", format="%d원"),
@@ -158,15 +167,10 @@ with tab_simulate:
                 st.markdown("---")
                 if st.button(f"✅ '{selected_customer_sim}'의 모든 가격 변경사항 DB에 저장", key="save_all_sim", type="primary"):
                     with st.spinner("DB에 가격 정보를 업데이트합니다..."):
-                        # =============================== 여기가 핵심 수정 부분 (시뮬레이션 저장) ===============================
-                        # 1. DB를 다시 로드하여 최신 상태 확보
+                        # 저장 로직은 변경할 필요가 없습니다.
+                        # 분석용으로 만든 '기준가 대비 차액' 컬럼은 DB 저장 대상이 아니기 때문입니다.
                         _, _, current_total_prices = load_and_prep_data()
-
-                        # 2. 다른 거래처 데이터는 그대로 분리
                         other_customer_prices = current_total_prices[current_total_prices['customer_name'] != selected_customer_sim].copy()
-
-                        # 3. 현재 화면에서 수정한 데이터(edited_df)를 기반으로 저장할 데이터 '재구성'
-                        #    저장 시에는 분석에만 사용된 '기준 도매가', '기준가 대비 차액' 등은 제외하고 필요한 컬럼만 저장합니다.
                         updated_data_to_save = analysis_df.rename(columns={
                             '마진율 (%)': 'margin_rate',
                             '개당 이익': 'profit_per_ea',
@@ -175,23 +179,10 @@ with tab_simulate:
                         updated_data_to_save['customer_name'] = selected_customer_sim
                         updated_data_to_save['confirm_date'] = datetime.now().strftime("%Y-%m-%d %H:%M")
                         
-                        # 저장할 최종 컬럼만 선택 (분석용 컬럼 제외)
-                        save_columns = [
-                            'confirm_date', 'unique_name', 'customer_name', 'stand_cost', 
-                            'supply_price', 'margin_rate', 'profit_per_ea', 'profit_per_box'
-                        ]
-                        # 혹시 모를 누락에 대비하여 DB에 있는 모든 컬럼을 포함시키도록 처리
-                        if not current_total_prices.empty:
-                            save_columns = list(current_total_prices.columns)
-                        
-                        # 최종 저장 DF에서 필요한 컬럼만 남김
+                        save_columns = list(current_total_prices.columns)
                         final_save_df = updated_data_to_save[[col for col in save_columns if col in updated_data_to_save.columns]]
 
-
-                        # 4. 다른 거래처 데이터와 재구성된 현재 거래처 데이터를 합침
                         final_prices_df = pd.concat([other_customer_prices, final_save_df], ignore_index=True)
-
-                        # 5. DB에 덮어쓰기
                         price_sheet = get_gsheet_client().open(PRICE_DB_NAME).worksheet("confirmed_prices")
                         set_with_dataframe(price_sheet, final_prices_df, allow_formulas=False)
 
@@ -199,69 +190,6 @@ with tab_simulate:
                         st.cache_data.clear()
                         time.sleep(1)
                         st.rerun()
-
-# ==================== 거래처별 품목 관리 탭 ====================
-with tab_matrix:
-    st.header("거래처별 취급 품목 설정")
-    manage_customer = st.selectbox("관리할 거래처를 선택하세요", customers_df['customer_name'].unique(), key="manage_customer")
-    if manage_customer:
-        st.markdown(f"#### 📄 **{manage_customer}** 의 취급 품목 목록")
-        active_products_set = set()
-        if not prices_df.empty and 'unique_name' in prices_df.columns:
-            active_products_set = set(prices_df[prices_df['customer_name'] == manage_customer]['unique_name'])
-
-        checkbox_states = {}
-        for _, product in products_df.iterrows():
-            is_checked = product['unique_name'] in active_products_set
-            checkbox_states[product['unique_name']] = st.checkbox(
-                product['unique_name'], value=is_checked, key=f"check_{manage_customer}_{product['unique_name']}"
-            )
-
-        if st.button(f"✅ **{manage_customer}** 의 품목 정보 저장", use_container_width=True, type="primary"):
-            with st.spinner("DB를 업데이트하는 중입니다..."):
-                # =============================== 여기가 핵심 수정 부분 (품목 관리 저장) ===============================
-                # 1. DB를 다시 로드하여 최신 상태 확보
-                _, _, current_prices = load_and_prep_data()
-
-                # 2. 다른 거래처 데이터는 그대로 분리
-                other_customer_prices = current_prices[current_prices['customer_name'] != manage_customer].copy()
-
-                # 3. 현재 체크박스 상태를 기반으로 이 거래처의 데이터를 '재구성'
-                newly_active_products = {name for name, checked in checkbox_states.items() if checked}
-
-                # 재구성할 데이터를 담을 리스트
-                reconstructed_entries = []
-                for unique_name in newly_active_products:
-                    # 기존에 데이터가 있었는지 확인
-                    existing_entry = current_prices[
-                        (current_prices['customer_name'] == manage_customer) &
-                        (current_prices['unique_name'] == unique_name)
-                    ]
-
-                    if not existing_entry.empty:
-                        # 기존 데이터가 있으면 그대로 사용
-                        reconstructed_entries.append(existing_entry.iloc[0].to_dict())
-                    else:
-                        # 기존 데이터가 없으면 새로 생성
-                        product_info = products_df.loc[products_df['unique_name'] == unique_name].iloc[0]
-                        reconstructed_entries.append({
-                            "confirm_date": datetime.now().strftime("%Y-%m-%d %H:%M"), "unique_name": unique_name, "customer_name": manage_customer,
-                            "stand_cost": product_info['stand_cost'], "supply_price": product_info['stand_price_ea'],
-                            "margin_rate": 0, "profit_per_ea": 0, "profit_per_box": 0
-                        })
-
-                # 4. 다른 거래처 데이터와 재구성된 현재 거래처 데이터를 합침
-                reconstructed_df = pd.DataFrame(reconstructed_entries)
-                final_df = pd.concat([other_customer_prices, reconstructed_df], ignore_index=True)
-
-                # 5. DB에 덮어쓰기
-                price_sheet = get_gsheet_client().open(PRICE_DB_NAME).worksheet("confirmed_prices")
-                set_with_dataframe(price_sheet, final_df, allow_formulas=False)
-
-                st.success(f"'{manage_customer}'의 취급 품목 정보가 DB에 성공적으로 업데이트되었습니다!")
-                st.cache_data.clear()
-                time.sleep(1)
-                st.rerun()
 
 # ==================== DB 원본 조회 탭 ====================
 with tab_db_view:
