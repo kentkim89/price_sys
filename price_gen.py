@@ -34,10 +34,16 @@ def load_and_prep_data():
     # 거래처 DB 로드
     clients_ws = client.open(CLIENT_DB_NAME).worksheet("confirmed_clients")
     clients_df = pd.DataFrame(clients_ws.get_all_records())
-    # 'customer_name', 'channel_type'를 제외한 모든 컬럼을 숫자로 변환 시도
     numeric_client_cols = [col for col in clients_df.columns if col not in ['customer_name', 'channel_type']]
+
+    # ================== 여기가 최종 핵심 수정 부분 ==================
+    # '%' 기호를 제거하는 로직을 추가하여 숫자 변환이 실패하지 않도록 합니다.
     for col in numeric_client_cols:
-        clients_df[col] = pd.to_numeric(clients_df[col].astype(str).str.replace(',', ''), errors='coerce')
+        clients_df[col] = clients_df[col].astype(str)          # 1. 컬럼을 문자로 변환
+        clients_df[col] = clients_df[col].str.replace('%', '') # 2. '%' 기호 제거
+        clients_df[col] = clients_df[col].str.replace(',', '') # 3. 쉼표 제거
+        clients_df[col] = pd.to_numeric(clients_df[col], errors='coerce') # 4. 숫자로 변환
+    # ==============================================================
     clients_df = clients_df.fillna(0)
 
     # 가격 DB 로드
@@ -115,41 +121,34 @@ with tab_simulate:
                 st.subheader("Step 2: 실시간 손익 분석 결과 확인")
                 customer_info = customers_df[customers_df['customer_name'] == selected_customer_sim].iloc[0]
 
-                # =============================== 여기가 핵심 수정 부분 (간선비 % 적용) ===============================
                 # 1. 거래처의 '지역 간선비(%)' 비율 값을 가져옴 (없으면 0)
                 #    ※ 시트의 실제 컬럼명과 정확히 일치해야 합니다.
-                trunk_fee_rate = float(customer_info.get('지역 간선비(%)', 0))
+                trunk_fee_rate = float(customer_info.get('지역 간선비 (%)', 0))
 
                 # 2. '지역 간선비(%)' 적용 여부를 결정할 체크박스 생성
                 apply_trunk_fee = False
                 if trunk_fee_rate > 0:
-                    # 체크박스의 라벨을 비율(%)로 표시하도록 수정
                     apply_trunk_fee = st.checkbox(f"**지역 간선비 적용 (비율: {trunk_fee_rate:,.1f}%)**", key="apply_trunk_fee")
-                
+
                 # '기타 수수료' 등 간선비 외의 공제 항목 계산
-                numeric_cols = [col for col in customer_info.index if col not in ['customer_name', 'channel_type', '지역 간선비(%)']]
+                numeric_cols = [col for col in customer_info.index if col not in ['customer_name', 'channel_type', '지역 간선비 (%)']]
                 conditions = {col: float(customer_info.get(col, 0)) for col in numeric_cols}
                 total_deduction_rate = sum(conditions.values()) / 100
                 
-                # 분석에 필요한 DataFrame 생성
                 analysis_df = pd.merge(edited_df, products_df[['unique_name', 'stand_price_ea', 'box_ea']], on='unique_name', how='left')
                 analysis_df['supply_price'] = pd.to_numeric(analysis_df['supply_price'], errors='coerce').fillna(0)
                 analysis_df['stand_price_ea'] = pd.to_numeric(analysis_df['stand_price_ea'], errors='coerce').fillna(0)
                 
-                # '실정산액'은 간선비를 제외한 기타 수수료만 먼저 적용
                 analysis_df['실정산액'] = analysis_df['supply_price'] * (1 - total_deduction_rate)
 
                 # 3. 체크박스 상태에 따라 품목별 간선비 금액을 계산
                 if apply_trunk_fee:
-                    # 공급단가에 간선비 비율을 곱하여 품목별 간선비 계산
                     analysis_df['적용된 간선비'] = analysis_df['supply_price'] * (trunk_fee_rate / 100)
                 else:
-                    # 체크 안 하면 간선비는 0
                     analysis_df['적용된 간선비'] = 0
                 
                 # 4. '개당 이익' 계산 시, '적용된 간선비'를 추가로 차감
                 analysis_df['개당 이익'] = analysis_df['실정산액'] - analysis_df['stand_cost'] - analysis_df['적용된 간선비']
-                # =========================================================================================
 
                 def format_difference(row):
                     difference = row['실정산액'] - row['stand_price_ea']
@@ -163,7 +162,6 @@ with tab_simulate:
                 analysis_df['마진율 (%)'] = analysis_df.apply(lambda row: (row['개당 이익'] / row['실정산액'] * 100) if row['실정산액'] > 0 else 0, axis=1)
                 analysis_df['박스당 이익'] = analysis_df['개당 이익'] * analysis_df['box_ea']
 
-                # 화면에 표시할 컬럼 순서 및 컬럼 설정 정의
                 display_cols = [
                     'unique_name', 'stand_price_ea', 'supply_price', '실정산액', '기준가 대비 차액',
                     '마진율 (%)', '개당 이익', '박스당 이익'
