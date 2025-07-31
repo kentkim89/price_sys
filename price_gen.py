@@ -34,9 +34,10 @@ def load_and_prep_data():
     # 거래처 DB 로드
     clients_ws = client.open(CLIENT_DB_NAME).worksheet("confirmed_clients")
     clients_df = pd.DataFrame(clients_ws.get_all_records())
+    # 'customer_name', 'channel_type'를 제외한 모든 컬럼을 숫자로 변환 시도
     numeric_client_cols = [col for col in clients_df.columns if col not in ['customer_name', 'channel_type']]
     for col in numeric_client_cols:
-        clients_df[col] = pd.to_numeric(clients_df[col], errors='coerce')
+        clients_df[col] = pd.to_numeric(clients_df[col].astype(str).str.replace(',', ''), errors='coerce')
     clients_df = clients_df.fillna(0)
 
     # 가격 DB 로드
@@ -113,37 +114,50 @@ with tab_simulate:
                 st.markdown("---")
                 st.subheader("Step 2: 실시간 손익 분석 결과 확인")
                 customer_info = customers_df[customers_df['customer_name'] == selected_customer_sim].iloc[0]
-                numeric_cols = [col for col in customer_info.index if col not in ['customer_name', 'channel_type']]
+                numeric_cols = [col for col in customer_info.index if col not in ['customer_name', 'channel_type', '지역간선비']]
                 conditions = {col: float(customer_info.get(col, 0)) for col in numeric_cols}
                 total_deduction_rate = sum(conditions.values()) / 100
 
-                # 1. 분석에 필요한 DataFrame 생성
+                # =============================== 여기가 핵심 수정 부분 (간선비 적용) ===============================
+                # 1. 거래처의 '지역간선비' 값을 가져옴 (없으면 0)
+                #    ※ 거래처 DB의 컬럼명이 '지역간선비'가 아니면 이 부분을 수정해야 합니다.
+                trunk_fee = float(customer_info.get('지역간선비', 0))
+
+                # 2. '지역간선비' 적용 여부를 결정할 체크박스 생성
+                apply_trunk_fee = False
+                if trunk_fee > 0:
+                    apply_trunk_fee = st.checkbox(f"**지역 간선비 적용 (금액: {trunk_fee:,.0f}원)**", key="apply_trunk_fee")
+                
+                # 3. 체크박스 상태에 따라 실제로 적용할 간선비 금액 결정
+                fee_to_apply = trunk_fee if apply_trunk_fee else 0
+                # =========================================================================================
+
+                # 분석에 필요한 DataFrame 생성
                 analysis_df = pd.merge(edited_df, products_df[['unique_name', 'stand_price_ea', 'box_ea']], on='unique_name', how='left')
                 analysis_df['supply_price'] = pd.to_numeric(analysis_df['supply_price'], errors='coerce').fillna(0)
                 analysis_df['stand_price_ea'] = pd.to_numeric(analysis_df['stand_price_ea'], errors='coerce').fillna(0)
                 analysis_df['실정산액'] = analysis_df['supply_price'] * (1 - total_deduction_rate)
 
-                # 2. '기준가 대비 차액'을 표시할 문자열을 만드는 함수 정의
+                # '기준가 대비 차액'을 표시할 문자열을 만드는 함수 정의
                 def format_difference(row):
                     difference = row['실정산액'] - row['stand_price_ea']
                     if row['stand_price_ea'] > 0:
                         percentage = (difference / row['stand_price_ea']) * 100
-                        # =============================== 여기가 핵심 수정 부분 ===============================
-                        # 부호 지정자인 '+'와 ',' 사이의 공백을 제거하여 에러를 해결합니다.
                         return f"{difference:+,.0f}원 ({percentage:+.1f}%)"
                     else:
                         return f"{difference:+,.0f}원 (N/A)"
-                # =====================================================================================
 
-                # 3. 위 함수를 적용하여 '기준가 대비 차액' 컬럼 생성
                 analysis_df['기준가 대비 차액'] = analysis_df.apply(format_difference, axis=1)
 
-                # 4. 나머지 분석 컬럼들 계산
-                analysis_df['개당 이익'] = analysis_df['실정산액'] - analysis_df['stand_cost']
+                # =============================== 여기가 핵심 수정 부분 (이익 계산) ===============================
+                # 4. '개당 이익' 계산 시, 적용하기로 한 간선비(fee_to_apply)를 추가로 차감
+                analysis_df['개당 이익'] = analysis_df['실정산액'] - analysis_df['stand_cost'] - fee_to_apply
+                # =========================================================================================
+                
                 analysis_df['마진율 (%)'] = analysis_df.apply(lambda row: (row['개당 이익'] / row['실정산액'] * 100) if row['실정산액'] > 0 else 0, axis=1)
                 analysis_df['박스당 이익'] = analysis_df['개당 이익'] * analysis_df['box_ea']
 
-                # 5. 화면에 표시할 컬럼 순서 및 컬럼 설정 정의
+                # 화면에 표시할 컬럼 순서 및 컬럼 설정 정의
                 display_cols = [
                     'unique_name', 'stand_price_ea', 'supply_price', '실정산액', '기준가 대비 차액',
                     '마진율 (%)', '개당 이익', '박스당 이익'
@@ -166,6 +180,8 @@ with tab_simulate:
                 st.markdown("---")
                 if st.button(f"✅ '{selected_customer_sim}'의 모든 가격 변경사항 DB에 저장", key="save_all_sim", type="primary"):
                     with st.spinner("DB에 가격 정보를 업데이트합니다..."):
+                        # 저장 로직은 변경할 필요 없습니다.
+                        # 화면에 보이는 최종 이익률이 그대로 저장됩니다.
                         _, _, current_total_prices = load_and_prep_data()
                         other_customer_prices = current_total_prices[current_total_prices['customer_name'] != selected_customer_sim].copy()
                         updated_data_to_save = analysis_df.rename(columns={
