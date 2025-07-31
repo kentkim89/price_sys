@@ -129,7 +129,7 @@ with tab_simulate:
                     if row['stand_price_ea'] > 0:
                         percentage = (difference / row['stand_price_ea']) * 100
                         # =============================== 여기가 핵심 수정 부분 ===============================
-                        # :d (정수) -> :+.0f (부호가 있는 소수점 0자리 실수)로 변경하여 에러 해결
+                        # 충돌하는 부호 지정자인 공백(' ')을 제거합니다.
                         return f"{difference:+, .0f}원 ({percentage:+.1f}%)"
                     else:
                         return f"{difference:+, .0f}원 (N/A)"
